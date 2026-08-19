@@ -1,6 +1,9 @@
 package engine
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type GameID string
 
@@ -270,6 +273,35 @@ func (gs *GameState) AliveNeutralCount() int {
 		}
 	}
 	return count
+}
+
+// ValidateConfig checks that the game config can produce a winnable game (§8.8)
+func ValidateConfig(cfg GameConfig) error {
+	if cfg.MinPlayers < 3 {
+		return fmt.Errorf("MinPlayers must be at least 3")
+	}
+	if cfg.MaxPlayers < cfg.MinPlayers {
+		return fmt.Errorf("MaxPlayers must be >= MinPlayers")
+	}
+	if cfg.MafiaRatioDivisor <= 0 {
+		return fmt.Errorf("MafiaRatioDivisor must be positive")
+	}
+	if cfg.SpecialRoleDivisor <= 0 {
+		return fmt.Errorf("SpecialRoleDivisor must be positive")
+	}
+	// Verify that at minimum player count, mafia can eventually win
+	minMafia := ComputeMafiaCount(cfg.MinPlayers, cfg.MafiaRatioDivisor)
+	if minMafia < 1 {
+		return fmt.Errorf("config produces 0 mafia at MinPlayers=%d", cfg.MinPlayers)
+	}
+	// Verify mafia never starts at parity
+	for n := cfg.MinPlayers; n <= cfg.MaxPlayers; n++ {
+		mc := ComputeMafiaCount(n, cfg.MafiaRatioDivisor)
+		if mc >= (n+1)/2 {
+			return fmt.Errorf("mafia starts at parity/majority for n=%d (mafia=%d)", n, mc)
+		}
+	}
+	return nil
 }
 
 func (gs *GameState) AppendLog(eventType string, payload map[string]interface{}) {

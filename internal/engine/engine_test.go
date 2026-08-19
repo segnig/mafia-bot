@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -459,5 +460,79 @@ func TestDisconnectVoidsGame(t *testing.T) {
 
 	if gs.Phase != PhaseGameOver {
 		t.Error("game should be over when all players disconnect")
+	}
+}
+
+func TestHostTransfer(t *testing.T) {
+	gs := NewGameState("test", 123, 1, DefaultConfig())
+	gs.Players[1] = &Player{ID: 1, Username: "host", Alive: true}
+	gs.Players[2] = &Player{ID: 2, Username: "newhost", Alive: true}
+
+	gs, _ = Reduce(gs, HostTransferEvent{FromPlayerID: 1, ToPlayerID: 2})
+	if gs.HostID != 2 {
+		t.Errorf("host should be 2, got %d", gs.HostID)
+	}
+}
+
+func TestHostTransferNonHost(t *testing.T) {
+	gs := NewGameState("test", 123, 1, DefaultConfig())
+	gs.Players[1] = &Player{ID: 1, Username: "host", Alive: true}
+	gs.Players[2] = &Player{ID: 2, Username: "other", Alive: true}
+
+	gs, _ = Reduce(gs, HostTransferEvent{FromPlayerID: 2, ToPlayerID: 1})
+	if gs.HostID != 1 {
+		t.Error("non-host should not be able to transfer")
+	}
+}
+
+func TestKickPlayer(t *testing.T) {
+	cfg := DefaultConfig()
+	gs := NewGameState("test", 123, 1, cfg)
+	gs.Phase = PhaseDiscussion
+	gs.Players[1] = &Player{ID: 1, Username: "host", Role: RoleVillager, Alive: true}
+	gs.Players[2] = &Player{ID: 2, Username: "afk", Role: RoleVillager, Alive: true}
+	gs.Players[3] = &Player{ID: 3, Username: "mafia", Role: RoleMafia, Alive: true}
+
+	gs, _ = Reduce(gs, KickEvent{HostID: 1, TargetID: 2})
+	if gs.Players[2].Alive {
+		t.Error("kicked player should be dead")
+	}
+}
+
+func TestRoleDeliveryFailed(t *testing.T) {
+	cfg := DefaultConfig()
+	gs := NewGameState("test", 123, 1, cfg)
+	gs.Phase = PhaseRoleAssign
+	gs.RosterLocked = true
+	for i := PlayerID(1); i <= 6; i++ {
+		gs.Players[i] = &Player{ID: i, Username: fmt.Sprintf("p%d", i), Alive: true, Role: RoleVillager}
+	}
+	gs.Players[1].Role = RoleMafia
+
+	gs, _ = Reduce(gs, RoleDeliveryFailedEvent{PlayerID: 6})
+	if _, exists := gs.Players[6]; exists {
+		t.Error("player 6 should be removed")
+	}
+	if len(gs.Players) != 5 {
+		t.Errorf("expected 5 players, got %d", len(gs.Players))
+	}
+}
+
+func TestValidateConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	if err := ValidateConfig(cfg); err != nil {
+		t.Errorf("default config should be valid: %v", err)
+	}
+
+	bad := cfg
+	bad.MinPlayers = 2
+	if err := ValidateConfig(bad); err == nil {
+		t.Error("MinPlayers=2 should be invalid")
+	}
+
+	bad2 := cfg
+	bad2.MafiaRatioDivisor = 0
+	if err := ValidateConfig(bad2); err == nil {
+		t.Error("MafiaRatioDivisor=0 should be invalid")
 	}
 }

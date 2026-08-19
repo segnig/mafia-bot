@@ -14,11 +14,12 @@ import (
 )
 
 type Bot struct {
-	api        *tgbotapi.BotAPI
-	sender     *Sender
-	supervisor *actor.Supervisor
-	store      store.Store
-	outbox     chan actor.OutgoingMessage
+	api           *tgbotapi.BotAPI
+	sender        *Sender
+	supervisor    *actor.Supervisor
+	store         store.Store
+	outbox        chan actor.OutgoingMessage
+	joinCooldowns map[string]time.Time // "chatID:playerID" -> expiry
 }
 
 func NewBot(token string, st store.Store) (*Bot, error) {
@@ -29,15 +30,67 @@ func NewBot(token string, st store.Store) (*Bot, error) {
 
 	outbox := make(chan actor.OutgoingMessage, 256)
 	b := &Bot{
-		api:        api,
-		sender:     NewSender(api, 3),
-		supervisor: actor.NewSupervisor(outbox),
-		store:      st,
-		outbox:     outbox,
+		api:           api,
+		sender:        NewSender(api, 3),
+		supervisor:    actor.NewSupervisor(outbox),
+		store:         st,
+		outbox:        outbox,
+		joinCooldowns: make(map[string]time.Time),
+	}
+
+	// Wire DM failure handler to detect blocked users (§8.2)
+	b.sender.OnDMFailure = func(userID int64, err error) {
+		playerID := engine.PlayerID(userID)
+		for _, gid := range b.supervisor.ActiveGames() {
+			ga := b.supervisor.GetGame(gid)
+			if ga == nil {
+				continue
+			}
+			state := ga.State()
+			if _, ok := state.Players[playerID]; ok {
+				ga.Send(engine.PlayerDisconnectedEvent{PlayerID: playerID})
+			}
+		}
 	}
 
 	go b.processOutbox()
+	b.recoverGames()
 	return b, nil
+}
+
+// recoverGames reloads persisted game states on boot (§8.7, §8a.8)
+func (b *Bot) recoverGames() {
+	gameIDs, err := b.store.ListActive()
+	if err != nil {
+		log.Printf("recovery: failed to list active games: %v", err)
+		return
+	}
+	for _, gid := range gameIDs {
+		state, err := b.store.Load(gid)
+		if err != nil {
+			log.Printf("recovery: failed to load game %s: %v", gid, err)
+			continue
+		}
+		if state.Phase == engine.PhaseGameOver || state.Phase == engine.PhaseIdle {
+			_ = b.store.Delete(gid)
+			continue
+		}
+
+		ga := b.supervisor.StartGame(state)
+		ga.OnPersist = func(s *engine.GameState) {
+			if err := b.store.Save(s); err != nil {
+				log.Printf("persist error: %v", err)
+			}
+		}
+
+		// If phase deadline already passed, fire timeout immediately
+		if !state.PhaseDeadline.IsZero() && time.Now().After(state.PhaseDeadline) {
+			ga.Send(engine.TimeoutEvent{Phase: state.Phase})
+		}
+
+		b.sender.SendText(state.ChatID, "🔄 The bot has restarted. Your game has been resumed!")
+		log.Printf("recovery: resumed game %s (phase: %s, day: %d)", gid, state.Phase, state.DayNumber)
+	}
 }
 
 func (b *Bot) Start() {
@@ -55,11 +108,15 @@ func (b *Bot) Start() {
 		if update.Message == nil {
 			continue
 		}
+		// Detect player leaving the group (§8.7)
+		if update.Message.LeftChatMember != nil {
+			b.handleLeftChatMember(update.Message)
+			continue
+		}
 		if update.Message.IsCommand() {
 			b.handleCommand(update.Message)
 			continue
 		}
-		// DM /start confirmation
 		if update.Message.Chat.IsPrivate() {
 			b.handleDMStart(update.Message)
 		}
@@ -68,6 +125,16 @@ func (b *Bot) Start() {
 
 func (b *Bot) Stop() {
 	b.sender.Stop()
+}
+
+func (b *Bot) handleLeftChatMember(msg *tgbotapi.Message) {
+	playerID := engine.PlayerID(msg.LeftChatMember.ID)
+	gameID := engine.GameID(fmt.Sprintf("%d", msg.Chat.ID))
+	ga := b.supervisor.GetGame(gameID)
+	if ga == nil {
+		return
+	}
+	ga.Send(engine.PlayerDisconnectedEvent{PlayerID: playerID})
 }
 
 func (b *Bot) handleDMStart(msg *tgbotapi.Message) {
@@ -96,6 +163,10 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdNominate(msg)
 	case "second":
 		b.cmdSecond(msg)
+	case "host":
+		b.cmdTransferHost(msg)
+	case "kick":
+		b.cmdKick(msg)
 	case "start":
 		if msg.Chat.IsPrivate() {
 			b.handleDMStart(msg)
@@ -117,6 +188,10 @@ func (b *Bot) cmdStartGame(msg *tgbotapi.Message) {
 
 	hostID := engine.PlayerID(msg.From.ID)
 	cfg := engine.DefaultConfig()
+	if err := engine.ValidateConfig(cfg); err != nil {
+		b.sender.SendText(msg.Chat.ID, fmt.Sprintf("Invalid game config: %v", err))
+		return
+	}
 	state := engine.NewGameState(gameID, msg.Chat.ID, hostID, cfg)
 
 	// Add host as first player
@@ -156,9 +231,24 @@ func (b *Bot) cmdJoin(msg *tgbotapi.Message) {
 	playerID := engine.PlayerID(msg.From.ID)
 
 	if ga == nil {
-		// No active game — add to waitlist
 		_ = b.store.AddToWaitlist(msg.Chat.ID, playerID)
 		b.sender.SendText(msg.Chat.ID, "No active game. You've been added to the waitlist for the next game.")
+		return
+	}
+
+	// Check if game already started — apply cooldown to prevent spam (§8a.3)
+	state := ga.State()
+	if state.Phase != engine.PhaseLobby {
+		cooldownKey := fmt.Sprintf("%d:%d", msg.Chat.ID, playerID)
+		if expiry, ok := b.joinCooldowns[cooldownKey]; ok && time.Now().Before(expiry) {
+			return // silently drop repeated attempts during cooldown
+		}
+		b.joinCooldowns[cooldownKey] = time.Now().Add(30 * time.Second)
+		_ = b.store.AddToWaitlist(msg.Chat.ID, playerID)
+		b.sender.SendText(msg.Chat.ID, fmt.Sprintf(
+			"@%s, this game already started — you can't join mid-game. You'll be notified when the next one opens.",
+			msg.From.UserName,
+		))
 		return
 	}
 
@@ -271,6 +361,46 @@ func (b *Bot) extractTargetPlayer(msg *tgbotapi.Message, ga *actor.GameActor) en
 	return 0
 }
 
+func (b *Bot) cmdTransferHost(msg *tgbotapi.Message) {
+	if msg.Chat.IsPrivate() {
+		return
+	}
+	gameID := engine.GameID(fmt.Sprintf("%d", msg.Chat.ID))
+	ga := b.supervisor.GetGame(gameID)
+	if ga == nil {
+		return
+	}
+	targetID := b.extractTargetPlayer(msg, ga)
+	if targetID == 0 {
+		b.sender.SendText(msg.Chat.ID, "Usage: /host @player (reply to their message or mention them)")
+		return
+	}
+	ga.Send(engine.HostTransferEvent{
+		FromPlayerID: engine.PlayerID(msg.From.ID),
+		ToPlayerID:   targetID,
+	})
+}
+
+func (b *Bot) cmdKick(msg *tgbotapi.Message) {
+	if msg.Chat.IsPrivate() {
+		return
+	}
+	gameID := engine.GameID(fmt.Sprintf("%d", msg.Chat.ID))
+	ga := b.supervisor.GetGame(gameID)
+	if ga == nil {
+		return
+	}
+	targetID := b.extractTargetPlayer(msg, ga)
+	if targetID == 0 {
+		b.sender.SendText(msg.Chat.ID, "Usage: /kick @player")
+		return
+	}
+	ga.Send(engine.KickEvent{
+		HostID:   engine.PlayerID(msg.From.ID),
+		TargetID: targetID,
+	})
+}
+
 func (b *Bot) cmdEndGame(msg *tgbotapi.Message) {
 	if msg.Chat.IsPrivate() {
 		return
@@ -280,7 +410,10 @@ func (b *Bot) cmdEndGame(msg *tgbotapi.Message) {
 	if ga == nil {
 		return
 	}
-	ga.Send(engine.EndGameEvent{PlayerID: engine.PlayerID(msg.From.ID)})
+	ga.Send(engine.EndGameEvent{
+		PlayerID: engine.PlayerID(msg.From.ID),
+		IsAdmin:  b.isGroupAdmin(msg.Chat.ID, msg.From.ID),
+	})
 }
 
 func (b *Bot) cmdStatus(msg *tgbotapi.Message) {
@@ -373,9 +506,20 @@ func (b *Bot) handleNightCallback(cq *tgbotapi.CallbackQuery, parts []string) {
 		return
 	}
 
+	// Anti-cheat: validate player is in game, alive, and phase is correct (§8.9)
+	playerID := engine.PlayerID(cq.From.ID)
+	state := ga.State()
+	p, inGame := state.Players[playerID]
+	if !inGame || !p.Alive {
+		return
+	}
+	if state.Phase != engine.PhaseNight {
+		return
+	}
+
 	ga.Send(engine.NightActionEvent{
 		Action: engine.NightAction{
-			ActorID:     engine.PlayerID(cq.From.ID),
+			ActorID:     playerID,
 			Kind:        actionKind,
 			TargetID:    engine.PlayerID(targetID),
 			SubmittedAt: time.Now(),
@@ -399,9 +543,20 @@ func (b *Bot) handleVoteCallback(cq *tgbotapi.CallbackQuery, parts []string) {
 		return
 	}
 
+	// Anti-cheat: validate player is in game, alive, and phase is voting (§8.9)
+	playerID := engine.PlayerID(cq.From.ID)
+	state := ga.State()
+	p, inGame := state.Players[playerID]
+	if !inGame || !p.Alive {
+		return
+	}
+	if state.Phase != engine.PhaseVoting {
+		return
+	}
+
 	ga.Send(engine.VoteEvent{
 		Vote: engine.Vote{
-			VoterID:   engine.PlayerID(cq.From.ID),
+			VoterID:   playerID,
 			TargetID:  engine.PlayerID(targetID),
 			Timestamp: time.Now(),
 		},
@@ -429,6 +584,19 @@ func (b *Bot) handleJoinCallback(cq *tgbotapi.CallbackQuery, parts []string) {
 		Username: cq.From.UserName,
 		Time:     time.Now(),
 	})
+}
+
+func (b *Bot) isGroupAdmin(chatID int64, userID int64) bool {
+	chatMember, err := b.api.GetChatMember(tgbotapi.GetChatMemberConfig{
+		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+			ChatID: chatID,
+			UserID: userID,
+		},
+	})
+	if err != nil {
+		return false
+	}
+	return chatMember.IsAdministrator() || chatMember.IsCreator()
 }
 
 func (b *Bot) getUsername(playerID engine.PlayerID) string {

@@ -19,6 +19,8 @@ func Reduce(gs *GameState, ev Event) (*GameState, []SideEffect) {
 		return reduceEndGame(gs, e)
 	case RolesDeliveredEvent:
 		return reduceRolesDelivered(gs)
+	case RoleDeliveryFailedEvent:
+		return reduceRoleDeliveryFailed(gs, e)
 	case NightActionEvent:
 		return reduceNightAction(gs, e)
 	case TimeoutEvent:
@@ -31,6 +33,10 @@ func Reduce(gs *GameState, ev Event) (*GameState, []SideEffect) {
 		return reduceSecond(gs, e)
 	case LastWordsCompleteEvent:
 		return reduceLastWordsComplete(gs)
+	case HostTransferEvent:
+		return reduceHostTransfer(gs, e)
+	case KickEvent:
+		return reduceKick(gs, e)
 	case PlayerDisconnectedEvent:
 		return reduceDisconnect(gs, e)
 	case TimerWarningEvent:
@@ -144,7 +150,8 @@ func reduceBegin(gs *GameState, e BeginEvent) (*GameState, []SideEffect) {
 	}
 
 	var effects []SideEffect
-	effects = append(effects, SendGroupEffect{gs.ChatID, "🎬 The game is starting! Check your DMs for your role..."})
+	effects = append(effects, SendGroupEffect{gs.ChatID, "🎬 The game is starting! Check your DMs for your role...\n\n⚠️ *Fair Play Reminder:* Do not screenshot or share your DM role with others. Play fair and keep the mystery alive!"})
+
 
 	optionalRolesChosen := []string{}
 	mafiaCount := 0
@@ -218,6 +225,58 @@ func joinStrings(ss []string) string {
 		result += s
 	}
 	return result
+}
+
+func reduceRoleDeliveryFailed(gs *GameState, e RoleDeliveryFailedEvent) (*GameState, []SideEffect) {
+	if gs.Phase != PhaseRoleAssign {
+		return gs, nil
+	}
+	p, exists := gs.Players[e.PlayerID]
+	if !exists {
+		return gs, nil
+	}
+
+	// Remove the player and redistribute roles (§8.3)
+	username := p.Username
+	delete(gs.Players, e.PlayerID)
+	gs.AppendLog("player_removed_dm_fail", map[string]interface{}{"player_id": e.PlayerID})
+
+	n := len(gs.Players)
+	if n < gs.Config.MinPlayers {
+		gs.Phase = PhaseLobby
+		gs.RosterLocked = false
+		return gs, []SideEffect{
+			SendGroupEffect{gs.ChatID, fmt.Sprintf("@%s could not receive their role and has been removed. Not enough players remain — back to lobby.", username)},
+		}
+	}
+
+	// Recompute roles for remaining players
+	playerIDs := make([]PlayerID, 0, n)
+	for pid := range gs.Players {
+		playerIDs = append(playerIDs, pid)
+	}
+
+	assignment, err := AllocateRoles(playerIDs, gs.Config, rand.Reader)
+	if err != nil {
+		gs.Phase = PhaseLobby
+		gs.RosterLocked = false
+		return gs, []SideEffect{
+			SendGroupEffect{gs.ChatID, "Failed to reassign roles. Returning to lobby."},
+		}
+	}
+
+	var effects []SideEffect
+	effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf("@%s could not receive their role and has been removed. Roles have been reassigned to remaining players.", username)})
+
+	for pid, role := range assignment {
+		gs.Players[pid].Role = role
+		effects = append(effects, SendDMEffect{
+			PlayerID: pid,
+			Text:     formatRoleDM(role),
+		})
+	}
+
+	return gs, effects
 }
 
 func reduceRolesDelivered(gs *GameState) (*GameState, []SideEffect) {
@@ -1061,13 +1120,64 @@ func reduceLastWordsComplete(gs *GameState) (*GameState, []SideEffect) {
 	return executeLynch(gs, lynchTarget, maxVotes, nil)
 }
 
+func reduceHostTransfer(gs *GameState, e HostTransferEvent) (*GameState, []SideEffect) {
+	if e.FromPlayerID != gs.HostID {
+		return gs, []SideEffect{
+			SendGroupEffect{gs.ChatID, "Only the current host can transfer host."},
+		}
+	}
+	target, exists := gs.Players[e.ToPlayerID]
+	if !exists {
+		return gs, []SideEffect{
+			SendGroupEffect{gs.ChatID, "That player is not in this game."},
+		}
+	}
+	gs.HostID = e.ToPlayerID
+	gs.AppendLog("host_transfer", map[string]interface{}{"from": e.FromPlayerID, "to": e.ToPlayerID})
+	return gs, []SideEffect{
+		SendGroupEffect{gs.ChatID, fmt.Sprintf("👑 Host transferred to @%s.", target.Username)},
+	}
+}
+
+func reduceKick(gs *GameState, e KickEvent) (*GameState, []SideEffect) {
+	// Only host can kick (or admin — checked at handler level)
+	if e.HostID != gs.HostID {
+		return gs, []SideEffect{
+			SendGroupEffect{gs.ChatID, "Only the host can kick players."},
+		}
+	}
+	target, exists := gs.Players[e.TargetID]
+	if !exists || !target.Alive {
+		return gs, []SideEffect{
+			SendGroupEffect{gs.ChatID, "That player is not alive in this game."},
+		}
+	}
+	target.Alive = false
+	target.Disconnected = true
+	gs.AppendLog("player_kicked", map[string]interface{}{"player_id": e.TargetID, "by": e.HostID})
+
+	effects := []SideEffect{
+		SendGroupEffect{gs.ChatID, fmt.Sprintf("🚪 @%s has been kicked from the game by the host.", target.Username)},
+	}
+
+	// Check win after kick
+	if winner := checkWinCondition(gs); winner != nil {
+		gs.Phase = PhaseGameOver
+		gs.Winner = winner
+		effects = append(effects, GameOverEffect{*winner})
+		effects = append(effects, SendGroupEffect{gs.ChatID, formatGameOver(gs)})
+	}
+	return gs, effects
+}
+
 func reduceEndGame(gs *GameState, e EndGameEvent) (*GameState, []SideEffect) {
 	if gs.Phase == PhaseIdle || gs.Phase == PhaseGameOver {
 		return gs, nil
 	}
-	if e.PlayerID != gs.HostID {
+	// Host or admin can end (admin check done at handler level, IsAdmin flag on event)
+	if e.PlayerID != gs.HostID && !e.IsAdmin {
 		return gs, []SideEffect{
-			SendGroupEffect{gs.ChatID, "Only the host can end the game."},
+			SendGroupEffect{gs.ChatID, "Only the host or a group admin can end the game."},
 		}
 	}
 	gs.Phase = PhaseGameOver

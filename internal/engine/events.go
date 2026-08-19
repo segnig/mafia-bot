@@ -29,6 +29,7 @@ func (BeginEvent) eventTag() {}
 
 type EndGameEvent struct {
 	PlayerID PlayerID
+	IsAdmin  bool
 }
 
 func (EndGameEvent) eventTag() {}
@@ -90,6 +91,29 @@ func (SecondEvent) eventTag() {}
 type LastWordsCompleteEvent struct{}
 
 func (LastWordsCompleteEvent) eventTag() {}
+
+// HostTransferEvent — transfer host to another player
+type HostTransferEvent struct {
+	FromPlayerID PlayerID
+	ToPlayerID   PlayerID
+}
+
+func (HostTransferEvent) eventTag() {}
+
+// KickEvent — host kicks an AFK player
+type KickEvent struct {
+	HostID   PlayerID
+	TargetID PlayerID
+}
+
+func (KickEvent) eventTag() {}
+
+// RoleDeliveryFailedEvent — DM delivery failed for a player during role assignment (§8.3)
+type RoleDeliveryFailedEvent struct {
+	PlayerID PlayerID
+}
+
+func (RoleDeliveryFailedEvent) eventTag() {}
 
 // Side effects emitted by the reducer for the transport layer to execute
 type SideEffect interface {
