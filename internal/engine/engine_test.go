@@ -216,28 +216,50 @@ func TestReduceNightAction(t *testing.T) {
 }
 
 func TestReduceVote(t *testing.T) {
-	gs := NewGameState("test", 123, 1, DefaultConfig())
+	cfg := DefaultConfig()
+	cfg.AllowLastWords = false // disable last words for deterministic test
+	gs := NewGameState("test", 123, 1, cfg)
 	gs.Phase = PhaseVoting
 	gs.Players[1] = &Player{ID: 1, Username: "p1", Role: RoleMafia, Alive: true}
 	gs.Players[2] = &Player{ID: 2, Username: "p2", Role: RoleVillager, Alive: true}
 	gs.Players[3] = &Player{ID: 3, Username: "p3", Role: RoleVillager, Alive: true}
 	gs.Votes = make(map[PlayerID]Vote)
 
-	// Two votes for player 1
 	gs, _ = Reduce(gs, VoteEvent{Vote: Vote{VoterID: 2, TargetID: 1}})
 	gs, _ = Reduce(gs, VoteEvent{Vote: Vote{VoterID: 3, TargetID: 1}})
-
-	// After all alive players voted (3 alive, but player 1 hasn't voted yet)
-	// Actually only 2/3 voted, so lynch shouldn't resolve yet
-	if gs.Phase == PhaseLynchResolve {
-		// All 3 need to vote
-		t.Log("lynch resolved early - checking if vote count check works")
-	}
-
 	gs, _ = Reduce(gs, VoteEvent{Vote: Vote{VoterID: 1, TargetID: 2}})
-	// Now all 3 voted; plurality is player 1 with 2 votes
+
 	if gs.Players[1].Alive {
 		t.Error("player 1 should have been lynched (had majority votes)")
+	}
+}
+
+func TestReduceVoteWithLastWords(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowLastWords = true
+	gs := NewGameState("test", 123, 1, cfg)
+	gs.Phase = PhaseVoting
+	gs.Players[1] = &Player{ID: 1, Username: "p1", Role: RoleMafia, Alive: true}
+	gs.Players[2] = &Player{ID: 2, Username: "p2", Role: RoleVillager, Alive: true}
+	gs.Players[3] = &Player{ID: 3, Username: "p3", Role: RoleVillager, Alive: true}
+	gs.Votes = make(map[PlayerID]Vote)
+
+	gs, _ = Reduce(gs, VoteEvent{Vote: Vote{VoterID: 2, TargetID: 1}})
+	gs, _ = Reduce(gs, VoteEvent{Vote: Vote{VoterID: 3, TargetID: 1}})
+	gs, _ = Reduce(gs, VoteEvent{Vote: Vote{VoterID: 1, TargetID: 2}})
+
+	// Should be in last words phase, player still alive
+	if gs.Phase != PhaseLastWords {
+		t.Errorf("expected last_words phase, got %s", gs.Phase)
+	}
+	if !gs.Players[1].Alive {
+		t.Error("player should still be alive during last words")
+	}
+
+	// Complete last words
+	gs, _ = Reduce(gs, LastWordsCompleteEvent{})
+	if gs.Players[1].Alive {
+		t.Error("player 1 should be dead after last words complete")
 	}
 }
 
@@ -363,5 +385,79 @@ func TestSpecialRoleBudget(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("SpecialRoleBudget(%d, %d) = %d, want %d", tt.n, tt.divisor, got, tt.want)
 		}
+	}
+}
+
+func TestFirstNightImmunity(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.FirstNightKill = false
+	gs := NewGameState("test", 123, 1, cfg)
+	gs.Phase = PhaseNight
+	gs.DayNumber = 1
+	gs.Players[1] = &Player{ID: 1, Username: "mafia", Role: RoleMafia, Alive: true}
+	gs.Players[2] = &Player{ID: 2, Username: "v1", Role: RoleVillager, Alive: true}
+	gs.Players[3] = &Player{ID: 3, Username: "v2", Role: RoleVillager, Alive: true}
+	gs.Players[4] = &Player{ID: 4, Username: "v3", Role: RoleVillager, Alive: true}
+	gs.NightActions = make(map[PlayerID]NightAction)
+
+	// Mafia tries to submit a kill on Night 1
+	gs, effects := Reduce(gs, NightActionEvent{Action: NightAction{
+		ActorID:  1,
+		Kind:     ActionMafiaKill,
+		TargetID: 2,
+	}})
+	// Should be rejected since night actions aren't prompted for mafia on Night 1
+	// The action validator should still reject it since it's technically valid for the role
+	// but the game should resolve with no kill
+	_ = effects
+
+	// Force timeout to resolve night
+	gs, _ = Reduce(gs, TimeoutEvent{Phase: PhaseNight})
+
+	// No one should have died
+	for _, p := range gs.Players {
+		if !p.Alive {
+			t.Errorf("player %s should be alive on Night 1 with FirstNightKill=false", p.Username)
+		}
+	}
+}
+
+func TestNominationSystem(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.NominationSystem = true
+	cfg.AllowLastWords = false
+	gs := NewGameState("test", 123, 1, cfg)
+	gs.Phase = PhaseDiscussion
+	gs.Nominations = make(map[PlayerID]*Nomination)
+	gs.Players[1] = &Player{ID: 1, Username: "p1", Role: RoleMafia, Alive: true}
+	gs.Players[2] = &Player{ID: 2, Username: "p2", Role: RoleVillager, Alive: true}
+	gs.Players[3] = &Player{ID: 3, Username: "p3", Role: RoleVillager, Alive: true}
+
+	// Player 2 nominates Player 1
+	gs, _ = Reduce(gs, NominateEvent{NominatorID: 2, TargetID: 1})
+	if gs.Phase != PhaseNomination {
+		t.Errorf("expected nomination phase, got %s", gs.Phase)
+	}
+
+	// Player 3 seconds
+	gs, _ = Reduce(gs, SecondEvent{PlayerID: 3, NominationTarget: 1})
+	if gs.Phase != PhaseVoting {
+		t.Errorf("expected voting phase after second, got %s", gs.Phase)
+	}
+}
+
+func TestDisconnectVoidsGame(t *testing.T) {
+	gs := NewGameState("test", 123, 1, DefaultConfig())
+	gs.Phase = PhaseNight
+	gs.DayNumber = 1
+	gs.Players[1] = &Player{ID: 1, Username: "mafia", Role: RoleMafia, Alive: true}
+	gs.Players[2] = &Player{ID: 2, Username: "v1", Role: RoleVillager, Alive: true}
+	gs.NightActions = make(map[PlayerID]NightAction)
+
+	gs, _ = Reduce(gs, PlayerDisconnectedEvent{PlayerID: 1})
+	gs, _ = Reduce(gs, PlayerDisconnectedEvent{PlayerID: 2})
+
+	if gs.Phase != PhaseGameOver {
+		t.Error("game should be over when all players disconnect")
 	}
 }

@@ -92,6 +92,10 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdStatus(msg)
 	case "myrole":
 		b.cmdMyRole(msg)
+	case "nominate":
+		b.cmdNominate(msg)
+	case "second":
+		b.cmdSecond(msg)
 	case "start":
 		if msg.Chat.IsPrivate() {
 			b.handleDMStart(msg)
@@ -198,6 +202,73 @@ func (b *Bot) cmdBegin(msg *tgbotapi.Message) {
 		return
 	}
 	ga.Send(engine.BeginEvent{PlayerID: engine.PlayerID(msg.From.ID)})
+}
+
+func (b *Bot) cmdNominate(msg *tgbotapi.Message) {
+	if msg.Chat.IsPrivate() {
+		return
+	}
+	gameID := engine.GameID(fmt.Sprintf("%d", msg.Chat.ID))
+	ga := b.supervisor.GetGame(gameID)
+	if ga == nil {
+		return
+	}
+	// Parse mentioned user from command args or reply
+	targetID := b.extractTargetPlayer(msg, ga)
+	if targetID == 0 {
+		b.sender.SendText(msg.Chat.ID, "Usage: /nominate @player (or reply to their message)")
+		return
+	}
+	ga.Send(engine.NominateEvent{
+		NominatorID: engine.PlayerID(msg.From.ID),
+		TargetID:    targetID,
+	})
+}
+
+func (b *Bot) cmdSecond(msg *tgbotapi.Message) {
+	if msg.Chat.IsPrivate() {
+		return
+	}
+	gameID := engine.GameID(fmt.Sprintf("%d", msg.Chat.ID))
+	ga := b.supervisor.GetGame(gameID)
+	if ga == nil {
+		return
+	}
+	targetID := b.extractTargetPlayer(msg, ga)
+	if targetID == 0 {
+		b.sender.SendText(msg.Chat.ID, "Usage: /second @player (the player who was nominated)")
+		return
+	}
+	ga.Send(engine.SecondEvent{
+		PlayerID:         engine.PlayerID(msg.From.ID),
+		NominationTarget: targetID,
+	})
+}
+
+func (b *Bot) extractTargetPlayer(msg *tgbotapi.Message, ga *actor.GameActor) engine.PlayerID {
+	// Check if replying to someone
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
+		return engine.PlayerID(msg.ReplyToMessage.From.ID)
+	}
+	// Check for mentioned entities
+	if msg.Entities != nil {
+		for _, entity := range msg.Entities {
+			if entity.Type == "text_mention" && entity.User != nil {
+				return engine.PlayerID(entity.User.ID)
+			}
+			if entity.Type == "mention" {
+				// Extract username from text and find in players
+				username := msg.Text[entity.Offset+1 : entity.Offset+entity.Length] // skip @
+				state := ga.State()
+				for _, p := range state.Players {
+					if p.Username == username {
+						return p.ID
+					}
+				}
+			}
+		}
+	}
+	return 0
 }
 
 func (b *Bot) cmdEndGame(msg *tgbotapi.Message) {
@@ -360,6 +431,20 @@ func (b *Bot) handleJoinCallback(cq *tgbotapi.CallbackQuery, parts []string) {
 	})
 }
 
+func (b *Bot) getUsername(playerID engine.PlayerID) string {
+	for _, gid := range b.supervisor.ActiveGames() {
+		ga := b.supervisor.GetGame(gid)
+		if ga == nil {
+			continue
+		}
+		state := ga.State()
+		if p, ok := state.Players[playerID]; ok {
+			return p.Username
+		}
+	}
+	return "unknown"
+}
+
 func (b *Bot) processOutbox() {
 	for msg := range b.outbox {
 		b.dispatchEffect(msg.Effect)
@@ -412,6 +497,12 @@ func (b *Bot) dispatchEffect(eff engine.SideEffect) {
 		}
 		kb := buildNightActionKeyboard(e.GameID, e.Targets, state.Players, actionKind)
 		b.sender.SendDMWithKeyboard(int64(e.PlayerID), prompt, kb)
+
+	case engine.SendLastWordsEffect:
+		b.sender.SendText(e.ChatID, fmt.Sprintf("🎤 @%s has the floor for last words...", b.getUsername(e.PlayerID)))
+
+	case engine.SendNominationKeyboardEffect:
+		// Handled via /nominate command, no keyboard needed
 
 	case engine.GameOverEffect:
 		// Already handled via SendGroupEffect in the reducer

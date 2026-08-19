@@ -47,7 +47,10 @@ const (
 	PhaseNightResolve Phase = "night_resolve"
 	PhaseDayAnnounce  Phase = "day_announce"
 	PhaseDiscussion   Phase = "discussion"
+	PhaseNomination   Phase = "nomination"  // nomination+second phase (optional)
+	PhaseTrial        Phase = "trial"       // accused player defends themselves
 	PhaseVoting       Phase = "voting"
+	PhaseLastWords    Phase = "last_words"  // lynched player's final statement
 	PhaseLynchResolve Phase = "lynch_resolve"
 	PhaseGameOver     Phase = "game_over"
 )
@@ -93,11 +96,15 @@ type GameConfig struct {
 	NightTimeoutSec      int
 	DiscussionTimeoutSec int
 	VotingTimeoutSec     int
+	LastWordsSec         int // time for lynched player to speak last words
 	RevealRoleOnDeath    bool
 	AllowNoLynch         bool
 	MafiaRatioDivisor    int
 	SpecialRoleDivisor   int
 	DoctorSelfProtect    bool
+	FirstNightKill       bool // if false, mafia cannot kill on Night 1 (classic variant)
+	NominationSystem     bool // if true, use nominate+second before voting
+	AllowLastWords       bool // if true, lynched player gets a brief moment to speak
 	OptionalRoles        []RoleDefinition
 }
 
@@ -109,11 +116,15 @@ func DefaultConfig() GameConfig {
 		NightTimeoutSec:      90,
 		DiscussionTimeoutSec: 120,
 		VotingTimeoutSec:     60,
+		LastWordsSec:         15,
 		RevealRoleOnDeath:    true,
 		AllowNoLynch:         true,
 		MafiaRatioDivisor:    4,
 		SpecialRoleDivisor:   3,
 		DoctorSelfProtect:    false,
+		FirstNightKill:       true,
+		NominationSystem:     false,
+		AllowLastWords:       true,
 		OptionalRoles:        DefaultOptionalRoles(),
 	}
 }
@@ -167,15 +178,32 @@ type GameState struct {
 	LastNightDeaths []PlayerID
 	LastCheckResult *CheckResult
 
+	// Nomination system state
+	Nominations    map[PlayerID]*Nomination // target -> nomination info
+	ActiveTrial    *PlayerID                // player currently on trial (nomination system)
+
+	// Last words
+	LastWordsPlayer *PlayerID // player currently giving last words before lynch
+
 	// Win tracking
 	Winner    *WinResult
 	JesterWon []PlayerID
+
+	// Statistics
+	ConsecutiveNoKillNights int
 }
 
 type CheckResult struct {
 	DetectiveID PlayerID
 	TargetID    PlayerID
 	ResultTeam  Team
+}
+
+type Nomination struct {
+	NominatorID PlayerID
+	TargetID    PlayerID
+	SecondedBy  PlayerID // 0 if not yet seconded
+	Time        time.Time
 }
 
 func NewGameState(gameID GameID, chatID int64, hostID PlayerID, cfg GameConfig) *GameState {

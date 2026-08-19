@@ -64,11 +64,32 @@ func (PlayerDisconnectedEvent) eventTag() {}
 
 // TimerWarningEvent fires at 60s and 10s before phase deadline
 type TimerWarningEvent struct {
-	Phase          Phase
-	SecondsLeft    int
+	Phase       Phase
+	SecondsLeft int
 }
 
 func (TimerWarningEvent) eventTag() {}
+
+// NominateEvent — a player nominates another for lynching (nomination system)
+type NominateEvent struct {
+	NominatorID PlayerID
+	TargetID    PlayerID
+}
+
+func (NominateEvent) eventTag() {}
+
+// SecondEvent — a player seconds an existing nomination
+type SecondEvent struct {
+	PlayerID     PlayerID
+	NominationTarget PlayerID
+}
+
+func (SecondEvent) eventTag() {}
+
+// LastWordsCompleteEvent — lynched player's last words time expired or they finished
+type LastWordsCompleteEvent struct{}
+
+func (LastWordsCompleteEvent) eventTag() {}
 
 // Side effects emitted by the reducer for the transport layer to execute
 type SideEffect interface {
@@ -134,3 +155,26 @@ type RemovePlayerEffect struct {
 }
 
 func (RemovePlayerEffect) effectTag() {}
+
+type SendNominationKeyboardEffect struct {
+	ChatID  int64
+	Targets []PlayerID
+	GameID  GameID
+}
+
+func (SendNominationKeyboardEffect) effectTag() {}
+
+type SendTrialEffect struct {
+	ChatID   int64
+	Accused  PlayerID
+	GameID   GameID
+}
+
+func (SendTrialEffect) effectTag() {}
+
+type SendLastWordsEffect struct {
+	ChatID   int64
+	PlayerID PlayerID
+}
+
+func (SendLastWordsEffect) effectTag() {}

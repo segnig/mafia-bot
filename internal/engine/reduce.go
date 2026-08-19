@@ -25,6 +25,12 @@ func Reduce(gs *GameState, ev Event) (*GameState, []SideEffect) {
 		return reduceTimeout(gs, e)
 	case VoteEvent:
 		return reduceVote(gs, e)
+	case NominateEvent:
+		return reduceNominate(gs, e)
+	case SecondEvent:
+		return reduceSecond(gs, e)
+	case LastWordsCompleteEvent:
+		return reduceLastWordsComplete(gs)
 	case PlayerDisconnectedEvent:
 		return reduceDisconnect(gs, e)
 	case TimerWarningEvent:
@@ -225,6 +231,9 @@ func transitionToNight(gs *GameState) (*GameState, []SideEffect) {
 	gs.Phase = PhaseNight
 	gs.DayNumber++
 	gs.NightActions = make(map[PlayerID]NightAction)
+	gs.Nominations = make(map[PlayerID]*Nomination)
+	gs.ActiveTrial = nil
+	gs.LastWordsPlayer = nil
 	gs.PhaseDeadline = time.Now().Add(time.Duration(gs.Config.NightTimeoutSec) * time.Second)
 
 	for _, p := range gs.Players {
@@ -235,7 +244,7 @@ func transitionToNight(gs *GameState) (*GameState, []SideEffect) {
 
 	aliveTargets := gs.AlivePlayerIDs()
 	var effects []SideEffect
-	effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf("🌙 *Night %d* falls over the town. Everyone close your eyes...", gs.DayNumber)})
+	effects = append(effects, SendGroupEffect{gs.ChatID, nightNarration(gs.DayNumber, len(gs.AlivePlayers()))})
 	effects = append(effects, SetTimerEffect{Duration: time.Duration(gs.Config.NightTimeoutSec) * time.Second, Phase: PhaseNight})
 
 	// Schedule warning timers
@@ -256,39 +265,35 @@ func transitionToNight(gs *GameState) (*GameState, []SideEffect) {
 	}
 
 	// Send action prompts to roles with abilities
-	hasActionRole := false
+	firstNight := gs.DayNumber == 1
 	for _, p := range gs.Players {
 		if !p.Alive || p.Disconnected {
 			continue
 		}
 		switch p.Role {
 		case RoleMafia, RoleGodfather:
-			targets := filterTargets(aliveTargets, p.ID, TeamMafia, gs)
-			effects = append(effects, SendNightActionEffect{p.ID, p.Role, targets, gs.ID})
-			hasActionRole = true
+			if firstNight && !gs.Config.FirstNightKill {
+				effects = append(effects, SendDMEffect{p.ID, "🌙 Night 1 — no kill tonight. Use this time to strategize with your team."})
+			} else {
+				targets := filterTargets(aliveTargets, p.ID, TeamMafia, gs)
+				effects = append(effects, SendNightActionEffect{p.ID, p.Role, targets, gs.ID})
+			}
 		case RoleDetective:
 			targets := filterOutSelf(aliveTargets, p.ID)
 			effects = append(effects, SendNightActionEffect{p.ID, RoleDetective, targets, gs.ID})
-			hasActionRole = true
 		case RoleDoctor:
 			targets := aliveTargets
 			if !gs.Config.DoctorSelfProtect {
 				targets = filterOutSelf(aliveTargets, p.ID)
 			}
 			effects = append(effects, SendNightActionEffect{p.ID, RoleDoctor, targets, gs.ID})
-			hasActionRole = true
 		case RoleVigilante:
 			if !p.UsedAbility {
 				targets := filterOutSelf(aliveTargets, p.ID)
 				effects = append(effects, SendNightActionEffect{p.ID, RoleVigilante, targets, gs.ID})
-				hasActionRole = true
 			}
 		}
 	}
-
-	// Edge case: if no action roles are alive, still run night for mafia kill
-	// (handled above — mafia always has at least one member alive if game hasn't ended)
-	_ = hasActionRole
 
 	return gs, effects
 }
@@ -399,12 +404,16 @@ func validActionForRole(role Role, kind string) bool {
 }
 
 func allNightActionsSubmitted(gs *GameState) bool {
+	firstNight := gs.DayNumber == 1
 	for _, p := range gs.Players {
 		if !p.Alive || p.Disconnected {
 			continue
 		}
 		switch p.Role {
 		case RoleMafia, RoleGodfather:
+			if firstNight && !gs.Config.FirstNightKill {
+				continue // no action needed on first night
+			}
 			if _, ok := gs.NightActions[p.ID]; !ok {
 				return false
 			}
@@ -446,8 +455,12 @@ func resolveNight(gs *GameState) (*GameState, []SideEffect) {
 		}
 	}
 
-	// Step 2a: Mafia kill
-	mafiaTarget := resolveMafiaTarget(gs)
+	// Step 2a: Mafia kill (skipped on Night 1 if FirstNightKill is disabled)
+	firstNight := gs.DayNumber == 1
+	mafiaTarget := PlayerID(0)
+	if !firstNight || gs.Config.FirstNightKill {
+		mafiaTarget = resolveMafiaTarget(gs)
+	}
 	if mafiaTarget != 0 {
 		if target, ok := gs.Players[mafiaTarget]; ok {
 			if target.ProtectedTonight {
@@ -532,15 +545,33 @@ func resolveNight(gs *GameState) (*GameState, []SideEffect) {
 		return gs, effects
 	}
 
+	// Track consecutive no-kill nights
+	if len(gs.LastNightDeaths) == 0 {
+		gs.ConsecutiveNoKillNights++
+	} else {
+		gs.ConsecutiveNoKillNights = 0
+	}
+
 	// Transition to day
 	gs.Phase = PhaseDayAnnounce
 	effects = append(effects, SendGroupEffect{gs.ChatID, formatNightDeaths(gs)})
 
-	gs.Phase = PhaseDiscussion
-	gs.Votes = make(map[PlayerID]Vote)
-	gs.PhaseDeadline = time.Now().Add(time.Duration(gs.Config.DiscussionTimeoutSec) * time.Second)
-	effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf("☀️ *Day %d* — Discuss! (%d seconds)", gs.DayNumber, gs.Config.DiscussionTimeoutSec)})
-	effects = append(effects, SetTimerEffect{Duration: time.Duration(gs.Config.DiscussionTimeoutSec) * time.Second, Phase: PhaseDiscussion})
+	// If nomination system is active, go to nomination phase instead of direct voting
+	if gs.Config.NominationSystem {
+		gs.Phase = PhaseDiscussion
+		gs.Votes = make(map[PlayerID]Vote)
+		gs.Nominations = make(map[PlayerID]*Nomination)
+		gs.PhaseDeadline = time.Now().Add(time.Duration(gs.Config.DiscussionTimeoutSec) * time.Second)
+		effects = append(effects, SendGroupEffect{gs.ChatID, dayNarration(gs.DayNumber, len(gs.AlivePlayers()))})
+		effects = append(effects, SendGroupEffect{gs.ChatID, "💬 Discuss and use /nominate @player to put someone on trial."})
+		effects = append(effects, SetTimerEffect{Duration: time.Duration(gs.Config.DiscussionTimeoutSec) * time.Second, Phase: PhaseDiscussion})
+	} else {
+		gs.Phase = PhaseDiscussion
+		gs.Votes = make(map[PlayerID]Vote)
+		gs.PhaseDeadline = time.Now().Add(time.Duration(gs.Config.DiscussionTimeoutSec) * time.Second)
+		effects = append(effects, SendGroupEffect{gs.ChatID, dayNarration(gs.DayNumber, len(gs.AlivePlayers()))})
+		effects = append(effects, SetTimerEffect{Duration: time.Duration(gs.Config.DiscussionTimeoutSec) * time.Second, Phase: PhaseDiscussion})
+	}
 
 	// Warning timers for discussion
 	discDur := gs.Config.DiscussionTimeoutSec
@@ -711,21 +742,52 @@ func resolveLynch(gs *GameState) (*GameState, []SideEffect) {
 		if !target.Alive {
 			effects = append(effects, SendGroupEffect{gs.ChatID, "⚖️ No valid lynch target. No one is lynched."})
 		} else {
-			target.Alive = false
-			gs.AppendLog("player_lynched", map[string]interface{}{"player_id": lynchTarget, "votes": maxVotes})
-
-			roleReveal := ""
-			if gs.Config.RevealRoleOnDeath {
-				roleReveal = fmt.Sprintf(" They were a *%s*.", string(target.Role))
+			// Last words phase before execution
+			if gs.Config.AllowLastWords {
+				gs.Phase = PhaseLastWords
+				gs.LastWordsPlayer = &lynchTarget
+				gs.PhaseDeadline = time.Now().Add(time.Duration(gs.Config.LastWordsSec) * time.Second)
+				effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf("⚖️ The town has decided. *%s*, you have %d seconds for your last words...", target.Username, gs.Config.LastWordsSec)})
+				effects = append(effects, SendLastWordsEffect{gs.ChatID, lynchTarget})
+				effects = append(effects, SetTimerEffect{Duration: time.Duration(gs.Config.LastWordsSec) * time.Second, Phase: PhaseLastWords})
+				return gs, effects
 			}
-			effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf("⚖️ The town has spoken! *%s* has been lynched with %d votes.%s", target.Username, maxVotes, roleReveal)})
 
-			// Jester win check (§2.2)
-			if target.Role == RoleJester {
-				gs.JesterWon = append(gs.JesterWon, lynchTarget)
-				effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf("🃏 *%s* was the *Jester* and wins! The game continues for everyone else.", target.Username)})
-			}
+			// No last words — execute immediately
+			return executeLynch(gs, lynchTarget, maxVotes, effects)
 		}
+	}
+
+	// Win check
+	if winner := checkWinCondition(gs); winner != nil {
+		gs.Phase = PhaseGameOver
+		gs.Winner = winner
+		effects = append(effects, GameOverEffect{*winner})
+		effects = append(effects, SendGroupEffect{gs.ChatID, formatGameOver(gs)})
+		return gs, effects
+	}
+
+	// Back to night
+	nightState, nightEffects := transitionToNight(gs)
+	effects = append(effects, nightEffects...)
+	return nightState, effects
+}
+
+func executeLynch(gs *GameState, lynchTarget PlayerID, maxVotes int, effects []SideEffect) (*GameState, []SideEffect) {
+	target := gs.Players[lynchTarget]
+	target.Alive = false
+	gs.AppendLog("player_lynched", map[string]interface{}{"player_id": lynchTarget, "votes": maxVotes})
+
+	roleReveal := ""
+	if gs.Config.RevealRoleOnDeath {
+		roleReveal = fmt.Sprintf(" They were a *%s*.", string(target.Role))
+	}
+	effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf("💀 *%s* has been executed by the town.%s", target.Username, roleReveal)})
+
+	// Jester win check (§2.2)
+	if target.Role == RoleJester {
+		gs.JesterWon = append(gs.JesterWon, lynchTarget)
+		effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf("🃏 *%s* was the *Jester* and wins! The game continues for everyone else.", target.Username)})
 	}
 
 	// Win check
@@ -777,6 +839,26 @@ func reduceTimeout(gs *GameState, e TimeoutEvent) (*GameState, []SideEffect) {
 	}
 
 	switch e.Phase {
+	case PhaseLastWords:
+		return reduceLastWordsComplete(gs)
+
+	case PhaseNomination:
+		// No nomination was seconded in time — no lynch today
+		gs.Phase = PhaseLynchResolve
+		effects := []SideEffect{
+			SendGroupEffect{gs.ChatID, "⏰ No nomination was seconded. No one is lynched today."},
+		}
+		if winner := checkWinCondition(gs); winner != nil {
+			gs.Phase = PhaseGameOver
+			gs.Winner = winner
+			effects = append(effects, GameOverEffect{*winner})
+			effects = append(effects, SendGroupEffect{gs.ChatID, formatGameOver(gs)})
+			return gs, effects
+		}
+		nightState, nightEffects := transitionToNight(gs)
+		effects = append(effects, nightEffects...)
+		return nightState, effects
+
 	case PhaseLobby:
 		if len(gs.Players) >= gs.Config.MinPlayers {
 			return reduceBegin(gs, BeginEvent{PlayerID: gs.HostID})
@@ -876,6 +958,109 @@ func reduceWarning(gs *GameState, e TimerWarningEvent) (*GameState, []SideEffect
 	}
 }
 
+func reduceNominate(gs *GameState, e NominateEvent) (*GameState, []SideEffect) {
+	if gs.Phase != PhaseDiscussion && gs.Phase != PhaseNomination {
+		return gs, nil
+	}
+	if !gs.Config.NominationSystem {
+		return gs, nil
+	}
+
+	nominator, exists := gs.Players[e.NominatorID]
+	if !exists || !nominator.Alive {
+		return gs, nil
+	}
+	target, exists := gs.Players[e.TargetID]
+	if !exists || !target.Alive {
+		return gs, nil
+	}
+	if e.NominatorID == e.TargetID {
+		return gs, nil // can't nominate yourself
+	}
+
+	// Check if this target is already nominated
+	if _, exists := gs.Nominations[e.TargetID]; exists {
+		return gs, []SideEffect{
+			SendGroupEffect{gs.ChatID, fmt.Sprintf("@%s is already nominated.", target.Username)},
+		}
+	}
+
+	gs.Nominations[e.TargetID] = &Nomination{
+		NominatorID: e.NominatorID,
+		TargetID:    e.TargetID,
+		Time:        time.Now(),
+	}
+	gs.AppendLog("nomination", map[string]interface{}{"nominator": e.NominatorID, "target": e.TargetID})
+
+	if gs.Phase == PhaseDiscussion {
+		gs.Phase = PhaseNomination
+	}
+
+	return gs, []SideEffect{
+		SendGroupEffect{gs.ChatID, fmt.Sprintf("⚠️ @%s nominates @%s for trial! Someone must /second this nomination.", nominator.Username, target.Username)},
+	}
+}
+
+func reduceSecond(gs *GameState, e SecondEvent) (*GameState, []SideEffect) {
+	if gs.Phase != PhaseNomination {
+		return gs, nil
+	}
+
+	seconder, exists := gs.Players[e.PlayerID]
+	if !exists || !seconder.Alive {
+		return gs, nil
+	}
+
+	nom, exists := gs.Nominations[e.NominationTarget]
+	if !exists {
+		return gs, []SideEffect{
+			SendGroupEffect{gs.ChatID, "There is no active nomination for that player."},
+		}
+	}
+
+	if e.PlayerID == nom.NominatorID {
+		return gs, []SideEffect{
+			SendGroupEffect{gs.ChatID, "You cannot second your own nomination."},
+		}
+	}
+
+	nom.SecondedBy = e.PlayerID
+	target := gs.Players[e.NominationTarget]
+	gs.AppendLog("nomination_seconded", map[string]interface{}{"seconder": e.PlayerID, "target": e.NominationTarget})
+
+	// Move to trial/voting for this player
+	gs.Phase = PhaseVoting
+	gs.ActiveTrial = &e.NominationTarget
+	gs.Votes = make(map[PlayerID]Vote)
+	gs.PhaseDeadline = time.Now().Add(time.Duration(gs.Config.VotingTimeoutSec) * time.Second)
+
+	return gs, []SideEffect{
+		SendGroupEffect{gs.ChatID, fmt.Sprintf("⚖️ @%s seconds the nomination! @%s is now on trial.\n\nVote: guilty (lynch) or innocent (spare). You have %d seconds.", seconder.Username, target.Username, gs.Config.VotingTimeoutSec)},
+		SendVotingKeyboardEffect{gs.ChatID, []PlayerID{e.NominationTarget}, gs.Config.AllowNoLynch},
+		SetTimerEffect{Duration: time.Duration(gs.Config.VotingTimeoutSec) * time.Second, Phase: PhaseVoting},
+	}
+}
+
+func reduceLastWordsComplete(gs *GameState) (*GameState, []SideEffect) {
+	if gs.Phase != PhaseLastWords || gs.LastWordsPlayer == nil {
+		return gs, nil
+	}
+
+	lynchTarget := *gs.LastWordsPlayer
+	gs.LastWordsPlayer = nil
+
+	// Tally from previous votes to get maxVotes
+	maxVotes := 0
+	for _, v := range gs.Votes {
+		if v.TargetID == lynchTarget {
+			maxVotes++
+		}
+	}
+
+	gs.Phase = PhaseLynchResolve
+	return executeLynch(gs, lynchTarget, maxVotes, nil)
+}
+
 func reduceEndGame(gs *GameState, e EndGameEvent) (*GameState, []SideEffect) {
 	if gs.Phase == PhaseIdle || gs.Phase == PhaseGameOver {
 		return gs, nil
@@ -890,4 +1075,33 @@ func reduceEndGame(gs *GameState, e EndGameEvent) (*GameState, []SideEffect) {
 	return gs, []SideEffect{
 		SendGroupEffect{gs.ChatID, "🛑 The game has been ended by the host. No winner declared.\n\n" + formatGameOver(gs)},
 	}
+}
+
+// Narrator-style thematic announcements
+func nightNarration(dayNum int, aliveCount int) string {
+	narrations := []string{
+		"🌙 *Night %d* — The town falls silent. Doors are locked, curtains drawn. Somewhere in the darkness, evil stirs...",
+		"🌑 *Night %d* — A cold wind sweeps through the empty streets. The townspeople retreat to their homes, hoping to see the dawn...",
+		"🌙 *Night %d* — The moon casts long shadows across the town square. %d souls lie awake, wondering who among them is the wolf...",
+		"🌑 *Night %d* — The clock tower strikes midnight. In the darkness, allegiances are tested and fates are sealed...",
+		"🌙 *Night %d* — Candles flicker and die. The town holds its breath as the night claims another victim — or does it?",
+	}
+	idx := (dayNum - 1) % len(narrations)
+	text := narrations[idx]
+	if idx == 2 {
+		return fmt.Sprintf(text, dayNum, aliveCount)
+	}
+	return fmt.Sprintf(text, dayNum)
+}
+
+func dayNarration(dayNum int, aliveCount int) string {
+	narrations := []string{
+		"☀️ *Day %d* — The survivors gather in the town square. %d remain. Someone here is not who they claim to be...",
+		"☀️ *Day %d* — Dawn breaks. The %d remaining townsfolk eye each other with suspicion. Time to find the truth.",
+		"☀️ *Day %d* — Another morning, another chance for justice. %d players remain — discuss and decide who to put on trial.",
+		"☀️ *Day %d* — The rooster crows. %d anxious faces gather. Today, the town must act — or the mafia will strike again tonight.",
+		"☀️ *Day %d* — Sunlight exposes what darkness conceals. Among the %d of you, wolves walk in sheep's clothing.",
+	}
+	idx := (dayNum - 1) % len(narrations)
+	return fmt.Sprintf(narrations[idx], dayNum, aliveCount)
 }
