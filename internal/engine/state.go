@@ -182,11 +182,17 @@ type GameState struct {
 	LastCheckResult *CheckResult
 
 	// Nomination system state
-	Nominations    map[PlayerID]*Nomination // target -> nomination info
-	ActiveTrial    *PlayerID                // player currently on trial (nomination system)
+	Nominations map[PlayerID]*Nomination // target -> nomination info
+	ActiveTrial *PlayerID                // player currently on trial (nomination system)
 
 	// Last words
 	LastWordsPlayer *PlayerID // player currently giving last words before lynch
+
+	// Discussion interaction state
+	Accusations  map[PlayerID][]PlayerID // target -> list of accusers
+	DefenseUsed  map[PlayerID]bool       // players who have used their defense statement
+	Whispers     []Whisper               // private whisper log for the day
+	SpeakCount   map[PlayerID]int        // track who spoke during discussion (for AFK detection)
 
 	// Win tracking
 	Winner    *WinResult
@@ -194,6 +200,13 @@ type GameState struct {
 
 	// Statistics
 	ConsecutiveNoKillNights int
+}
+
+type Whisper struct {
+	FromID  PlayerID
+	ToID    PlayerID
+	Message string
+	Time    time.Time
 }
 
 type CheckResult struct {

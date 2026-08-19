@@ -536,3 +536,90 @@ func TestValidateConfig(t *testing.T) {
 		t.Error("MafiaRatioDivisor=0 should be invalid")
 	}
 }
+
+func TestAccusation(t *testing.T) {
+	gs := NewGameState("test", 123, 1, DefaultConfig())
+	gs.Phase = PhaseDiscussion
+	gs.Accusations = make(map[PlayerID][]PlayerID)
+	gs.Players[1] = &Player{ID: 1, Username: "p1", Role: RoleVillager, Alive: true}
+	gs.Players[2] = &Player{ID: 2, Username: "p2", Role: RoleMafia, Alive: true}
+
+	gs, effects := Reduce(gs, AccuseEvent{AccuserID: 1, TargetID: 2})
+	if len(gs.Accusations[2]) != 1 {
+		t.Error("accusation should be recorded")
+	}
+	if len(effects) == 0 {
+		t.Error("expected group message effect")
+	}
+
+	// Duplicate accusation
+	gs, _ = Reduce(gs, AccuseEvent{AccuserID: 1, TargetID: 2})
+	if len(gs.Accusations[2]) != 1 {
+		t.Error("duplicate accusation should be blocked")
+	}
+}
+
+func TestDefend(t *testing.T) {
+	gs := NewGameState("test", 123, 1, DefaultConfig())
+	gs.Phase = PhaseDiscussion
+	gs.DefenseUsed = make(map[PlayerID]bool)
+	gs.Players[1] = &Player{ID: 1, Username: "accused", Role: RoleMafia, Alive: true}
+
+	gs, effects := Reduce(gs, DefendEvent{PlayerID: 1, Statement: "I am innocent!"})
+	if !gs.DefenseUsed[1] {
+		t.Error("defense should be marked as used")
+	}
+	if len(effects) == 0 {
+		t.Error("expected defense message")
+	}
+
+	// Can't defend twice
+	gs, effects = Reduce(gs, DefendEvent{PlayerID: 1, Statement: "Again!"})
+	if len(effects) != 1 {
+		t.Error("expected rejection message for second defense")
+	}
+}
+
+func TestWhisper(t *testing.T) {
+	gs := NewGameState("test", 123, 1, DefaultConfig())
+	gs.Phase = PhaseDiscussion
+	gs.Players[1] = &Player{ID: 1, Username: "sender", Role: RoleVillager, Alive: true}
+	gs.Players[2] = &Player{ID: 2, Username: "receiver", Role: RoleVillager, Alive: true}
+
+	gs, effects := Reduce(gs, WhisperEvent{FromID: 1, ToID: 2, Message: "trust me"})
+	if len(gs.Whispers) != 1 {
+		t.Error("whisper should be logged")
+	}
+	// Should have 3 effects: DM to receiver, DM to sender confirmation, group notification
+	if len(effects) != 3 {
+		t.Errorf("expected 3 effects, got %d", len(effects))
+	}
+}
+
+func TestWhisperOutsideDiscussion(t *testing.T) {
+	gs := NewGameState("test", 123, 1, DefaultConfig())
+	gs.Phase = PhaseVoting
+	gs.Players[1] = &Player{ID: 1, Username: "sender", Role: RoleVillager, Alive: true}
+	gs.Players[2] = &Player{ID: 2, Username: "receiver", Role: RoleVillager, Alive: true}
+
+	gs, effects := Reduce(gs, WhisperEvent{FromID: 1, ToID: 2, Message: "hello"})
+	if len(gs.Whispers) != 0 {
+		t.Error("whisper should not work outside discussion")
+	}
+	if len(effects) != 1 {
+		t.Error("expected rejection DM")
+	}
+}
+
+func TestPlayerSpokeTracking(t *testing.T) {
+	gs := NewGameState("test", 123, 1, DefaultConfig())
+	gs.Phase = PhaseDiscussion
+	gs.SpeakCount = make(map[PlayerID]int)
+	gs.Players[1] = &Player{ID: 1, Username: "talker", Role: RoleVillager, Alive: true}
+
+	gs, _ = Reduce(gs, PlayerSpokeEvent{PlayerID: 1})
+	gs, _ = Reduce(gs, PlayerSpokeEvent{PlayerID: 1})
+	if gs.SpeakCount[1] != 2 {
+		t.Errorf("expected speak count 2, got %d", gs.SpeakCount[1])
+	}
+}

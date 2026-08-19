@@ -33,6 +33,14 @@ func Reduce(gs *GameState, ev Event) (*GameState, []SideEffect) {
 		return reduceSecond(gs, e)
 	case LastWordsCompleteEvent:
 		return reduceLastWordsComplete(gs)
+	case AccuseEvent:
+		return reduceAccuse(gs, e)
+	case DefendEvent:
+		return reduceDefend(gs, e)
+	case WhisperEvent:
+		return reduceWhisper(gs, e)
+	case PlayerSpokeEvent:
+		return reducePlayerSpoke(gs, e)
 	case HostTransferEvent:
 		return reduceHostTransfer(gs, e)
 	case KickEvent:
@@ -293,6 +301,10 @@ func transitionToNight(gs *GameState) (*GameState, []SideEffect) {
 	gs.Nominations = make(map[PlayerID]*Nomination)
 	gs.ActiveTrial = nil
 	gs.LastWordsPlayer = nil
+	gs.Accusations = make(map[PlayerID][]PlayerID)
+	gs.DefenseUsed = make(map[PlayerID]bool)
+	gs.Whispers = nil
+	gs.SpeakCount = make(map[PlayerID]int)
 	gs.PhaseDeadline = time.Now().Add(time.Duration(gs.Config.NightTimeoutSec) * time.Second)
 
 	for _, p := range gs.Players {
@@ -629,6 +641,7 @@ func resolveNight(gs *GameState) (*GameState, []SideEffect) {
 		gs.Votes = make(map[PlayerID]Vote)
 		gs.PhaseDeadline = time.Now().Add(time.Duration(gs.Config.DiscussionTimeoutSec) * time.Second)
 		effects = append(effects, SendGroupEffect{gs.ChatID, dayNarration(gs.DayNumber, len(gs.AlivePlayers()))})
+		effects = append(effects, SendGroupEffect{gs.ChatID, discussionHelpText()})
 		effects = append(effects, SetTimerEffect{Duration: time.Duration(gs.Config.DiscussionTimeoutSec) * time.Second, Phase: PhaseDiscussion})
 	}
 
@@ -937,12 +950,15 @@ func reduceTimeout(gs *GameState, e TimeoutEvent) (*GameState, []SideEffect) {
 		gs.AppendLog("phase_change", map[string]interface{}{"phase": "voting"})
 
 		targets := gs.AlivePlayerIDs()
-		effects := []SideEffect{
-			SendGroupEffect{gs.ChatID, fmt.Sprintf("⚖️ *Voting phase!* You have %d seconds to cast your vote.", gs.Config.VotingTimeoutSec)},
-			SendVotingKeyboardEffect{gs.ChatID, targets, gs.Config.AllowNoLynch},
-			SetTimerEffect{Duration: time.Duration(gs.Config.VotingTimeoutSec) * time.Second, Phase: PhaseVoting},
-		}
-		// Warning timers
+		var effects []SideEffect
+
+		// Post discussion summary before voting
+		effects = append(effects, SendGroupEffect{gs.ChatID, formatDiscussionSummary(gs)})
+
+		effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf("⚖️ *Voting phase!* You have %d seconds to cast your vote.", gs.Config.VotingTimeoutSec)})
+		effects = append(effects, SendVotingKeyboardEffect{gs.ChatID, targets, gs.Config.AllowNoLynch})
+		effects = append(effects, SetTimerEffect{Duration: time.Duration(gs.Config.VotingTimeoutSec) * time.Second, Phase: PhaseVoting})
+
 		voteDur := gs.Config.VotingTimeoutSec
 		if voteDur > 10 {
 			effects = append(effects, SetWarningTimerEffect{Duration: time.Duration(voteDur-10) * time.Second, Phase: PhaseVoting, SecondsLeft: 10})
@@ -1120,6 +1136,144 @@ func reduceLastWordsComplete(gs *GameState) (*GameState, []SideEffect) {
 	return executeLynch(gs, lynchTarget, maxVotes, nil)
 }
 
+func reduceAccuse(gs *GameState, e AccuseEvent) (*GameState, []SideEffect) {
+	if gs.Phase != PhaseDiscussion && gs.Phase != PhaseNomination {
+		return gs, nil
+	}
+	accuser, exists := gs.Players[e.AccuserID]
+	if !exists || !accuser.Alive {
+		return gs, nil
+	}
+	target, exists := gs.Players[e.TargetID]
+	if !exists || !target.Alive {
+		return gs, nil
+	}
+	if e.AccuserID == e.TargetID {
+		return gs, nil
+	}
+
+	if gs.Accusations == nil {
+		gs.Accusations = make(map[PlayerID][]PlayerID)
+	}
+
+	// Check if already accused by this player
+	for _, aid := range gs.Accusations[e.TargetID] {
+		if aid == e.AccuserID {
+			return gs, []SideEffect{
+				SendGroupEffect{gs.ChatID, fmt.Sprintf("@%s, you already accused @%s.", accuser.Username, target.Username)},
+			}
+		}
+	}
+
+	gs.Accusations[e.TargetID] = append(gs.Accusations[e.TargetID], e.AccuserID)
+	gs.AppendLog("accusation", map[string]interface{}{"accuser": e.AccuserID, "target": e.TargetID})
+
+	count := len(gs.Accusations[e.TargetID])
+	aliveCount := len(gs.AlivePlayers())
+
+	var effects []SideEffect
+	effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf(
+		"👉 @%s accuses @%s! (%d/%d accusations)",
+		accuser.Username, target.Username, count, aliveCount,
+	)})
+
+	// If majority accuses someone, prompt them to defend
+	if count > aliveCount/2 {
+		effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf(
+			"⚠️ @%s has been accused by the majority! @%s, use /defend to make your case.",
+			target.Username, target.Username,
+		)})
+	}
+
+	return gs, effects
+}
+
+func reduceDefend(gs *GameState, e DefendEvent) (*GameState, []SideEffect) {
+	if gs.Phase != PhaseDiscussion && gs.Phase != PhaseNomination {
+		return gs, nil
+	}
+	player, exists := gs.Players[e.PlayerID]
+	if !exists || !player.Alive {
+		return gs, nil
+	}
+
+	if gs.DefenseUsed == nil {
+		gs.DefenseUsed = make(map[PlayerID]bool)
+	}
+	if gs.DefenseUsed[e.PlayerID] {
+		return gs, []SideEffect{
+			SendGroupEffect{gs.ChatID, fmt.Sprintf("@%s, you've already made your defense today.", player.Username)},
+		}
+	}
+
+	gs.DefenseUsed[e.PlayerID] = true
+	gs.AppendLog("defense", map[string]interface{}{"player": e.PlayerID})
+
+	statement := e.Statement
+	if len(statement) > 500 {
+		statement = statement[:500] + "..."
+	}
+
+	return gs, []SideEffect{
+		SendGroupEffect{gs.ChatID, fmt.Sprintf("🛡️ *@%s's Defense:*\n\"%s\"", player.Username, statement)},
+	}
+}
+
+func reduceWhisper(gs *GameState, e WhisperEvent) (*GameState, []SideEffect) {
+	if gs.Phase != PhaseDiscussion {
+		return gs, []SideEffect{
+			SendDMEffect{e.FromID, "Whispers are only allowed during the discussion phase."},
+		}
+	}
+	from, exists := gs.Players[e.FromID]
+	if !exists || !from.Alive {
+		return gs, nil
+	}
+	to, exists := gs.Players[e.ToID]
+	if !exists || !to.Alive {
+		return gs, []SideEffect{
+			SendDMEffect{e.FromID, "That player is not alive."},
+		}
+	}
+	if e.FromID == e.ToID {
+		return gs, nil
+	}
+
+	msg := e.Message
+	if len(msg) > 200 {
+		msg = msg[:200] + "..."
+	}
+
+	gs.Whispers = append(gs.Whispers, Whisper{
+		FromID:  e.FromID,
+		ToID:    e.ToID,
+		Message: msg,
+		Time:    time.Now(),
+	})
+	gs.AppendLog("whisper", map[string]interface{}{"from": e.FromID, "to": e.ToID})
+
+	return gs, []SideEffect{
+		SendDMEffect{e.ToID, fmt.Sprintf("🤫 *Whisper from @%s:* %s", from.Username, msg)},
+		SendDMEffect{e.FromID, fmt.Sprintf("🤫 Whisper sent to @%s.", to.Username)},
+		// Public notification that a whisper occurred (builds suspicion!)
+		SendGroupEffect{gs.ChatID, fmt.Sprintf("🤫 @%s whispered something to @%s...", from.Username, to.Username)},
+	}
+}
+
+func reducePlayerSpoke(gs *GameState, e PlayerSpokeEvent) (*GameState, []SideEffect) {
+	if gs.Phase != PhaseDiscussion {
+		return gs, nil
+	}
+	if _, exists := gs.Players[e.PlayerID]; !exists {
+		return gs, nil
+	}
+	if gs.SpeakCount == nil {
+		gs.SpeakCount = make(map[PlayerID]int)
+	}
+	gs.SpeakCount[e.PlayerID]++
+	return gs, nil
+}
+
 func reduceHostTransfer(gs *GameState, e HostTransferEvent) (*GameState, []SideEffect) {
 	if e.FromPlayerID != gs.HostID {
 		return gs, []SideEffect{
@@ -1214,4 +1368,50 @@ func dayNarration(dayNum int, aliveCount int) string {
 	}
 	idx := (dayNum - 1) % len(narrations)
 	return fmt.Sprintf(narrations[idx], dayNum, aliveCount)
+}
+
+func formatDiscussionSummary(gs *GameState) string {
+	msg := "📋 *Discussion Summary:*\n"
+
+	// Accusation tally
+	if len(gs.Accusations) > 0 {
+		msg += "\n*Accusations:*\n"
+		for targetID, accusers := range gs.Accusations {
+			target := gs.Players[targetID]
+			msg += fmt.Sprintf("  👉 @%s — %d accusation(s)\n", target.Username, len(accusers))
+		}
+	} else {
+		msg += "\n_No accusations were made._\n"
+	}
+
+	// Whisper activity
+	if len(gs.Whispers) > 0 {
+		msg += fmt.Sprintf("\n🤫 %d whisper(s) exchanged.\n", len(gs.Whispers))
+	}
+
+	// Silent players (AFK warning)
+	silent := []string{}
+	for _, p := range gs.Players {
+		if !p.Alive {
+			continue
+		}
+		if gs.SpeakCount == nil || gs.SpeakCount[p.ID] == 0 {
+			silent = append(silent, "@"+p.Username)
+		}
+	}
+	if len(silent) > 0 {
+		msg += "\n😶 *Silent players:* " + joinStrings(silent) + "\n"
+	}
+
+	return msg
+}
+
+func discussionHelpText() string {
+	return `💬 *Discussion Commands:*
+• /accuse @player — publicly accuse someone
+• /defend [statement] — make your defense (once per day)
+• /whisper @player [message] — send a private whisper (group sees it happened!)
+• /status — view game status
+
+_Discuss, argue, bluff, and deceive. The vote is coming..._`
 }

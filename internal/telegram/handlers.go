@@ -119,6 +119,9 @@ func (b *Bot) Start() {
 		}
 		if update.Message.Chat.IsPrivate() {
 			b.handleDMStart(update.Message)
+		} else {
+			// Track player activity during discussion (non-command messages)
+			b.trackDiscussionActivity(update.Message)
 		}
 	}
 }
@@ -167,6 +170,12 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdTransferHost(msg)
 	case "kick":
 		b.cmdKick(msg)
+	case "accuse":
+		b.cmdAccuse(msg)
+	case "defend":
+		b.cmdDefend(msg)
+	case "whisper":
+		b.cmdWhisper(msg)
 	case "start":
 		if msg.Chat.IsPrivate() {
 			b.handleDMStart(msg)
@@ -359,6 +368,94 @@ func (b *Bot) extractTargetPlayer(msg *tgbotapi.Message, ga *actor.GameActor) en
 		}
 	}
 	return 0
+}
+
+func (b *Bot) cmdAccuse(msg *tgbotapi.Message) {
+	if msg.Chat.IsPrivate() {
+		return
+	}
+	gameID := engine.GameID(fmt.Sprintf("%d", msg.Chat.ID))
+	ga := b.supervisor.GetGame(gameID)
+	if ga == nil {
+		return
+	}
+	targetID := b.extractTargetPlayer(msg, ga)
+	if targetID == 0 {
+		b.sender.SendText(msg.Chat.ID, "Usage: /accuse @player (or reply to their message)")
+		return
+	}
+	ga.Send(engine.AccuseEvent{
+		AccuserID: engine.PlayerID(msg.From.ID),
+		TargetID:  targetID,
+	})
+}
+
+func (b *Bot) cmdDefend(msg *tgbotapi.Message) {
+	if msg.Chat.IsPrivate() {
+		return
+	}
+	gameID := engine.GameID(fmt.Sprintf("%d", msg.Chat.ID))
+	ga := b.supervisor.GetGame(gameID)
+	if ga == nil {
+		return
+	}
+	statement := msg.CommandArguments()
+	if statement == "" {
+		b.sender.SendText(msg.Chat.ID, "Usage: /defend I am innocent because...")
+		return
+	}
+	ga.Send(engine.DefendEvent{
+		PlayerID:  engine.PlayerID(msg.From.ID),
+		Statement: statement,
+	})
+}
+
+func (b *Bot) cmdWhisper(msg *tgbotapi.Message) {
+	if msg.Chat.IsPrivate() {
+		return
+	}
+	gameID := engine.GameID(fmt.Sprintf("%d", msg.Chat.ID))
+	ga := b.supervisor.GetGame(gameID)
+	if ga == nil {
+		return
+	}
+
+	// Extract target and message from args: /whisper @player message
+	targetID := b.extractTargetPlayer(msg, ga)
+	if targetID == 0 {
+		b.sender.SendText(msg.Chat.ID, "Usage: /whisper @player your secret message")
+		return
+	}
+
+	// Get message text after the mention
+	args := msg.CommandArguments()
+	// Remove the @mention from the args to get the message body
+	whisperMsg := args
+	if msg.Entities != nil {
+		for _, entity := range msg.Entities {
+			if entity.Type == "mention" || entity.Type == "text_mention" {
+				endPos := entity.Offset + entity.Length - len("/whisper ") 
+				if endPos > 0 && endPos < len(args) {
+					whisperMsg = strings.TrimSpace(args[endPos:])
+				}
+			}
+		}
+	}
+	if whisperMsg == "" || whisperMsg == args {
+		// Fallback: split by space, first word is username, rest is message
+		parts := strings.SplitN(args, " ", 2)
+		if len(parts) < 2 {
+			b.sender.SendText(msg.Chat.ID, "Usage: /whisper @player your secret message")
+			return
+		}
+		whisperMsg = parts[1]
+	}
+
+	ga.Send(engine.WhisperEvent{
+		FromID:  engine.PlayerID(msg.From.ID),
+		ToID:    targetID,
+		Message: whisperMsg,
+	})
 }
 
 func (b *Bot) cmdTransferHost(msg *tgbotapi.Message) {
@@ -586,6 +683,22 @@ func (b *Bot) handleJoinCallback(cq *tgbotapi.CallbackQuery, parts []string) {
 	})
 }
 
+func (b *Bot) trackDiscussionActivity(msg *tgbotapi.Message) {
+	gameID := engine.GameID(fmt.Sprintf("%d", msg.Chat.ID))
+	ga := b.supervisor.GetGame(gameID)
+	if ga == nil {
+		return
+	}
+	state := ga.State()
+	if state.Phase != engine.PhaseDiscussion {
+		return
+	}
+	playerID := engine.PlayerID(msg.From.ID)
+	if _, inGame := state.Players[playerID]; inGame {
+		ga.Send(engine.PlayerSpokeEvent{PlayerID: playerID})
+	}
+}
+
 func (b *Bot) isGroupAdmin(chatID int64, userID int64) bool {
 	chatMember, err := b.api.GetChatMember(tgbotapi.GetChatMemberConfig{
 		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
@@ -668,6 +781,10 @@ func (b *Bot) dispatchEffect(eff engine.SideEffect) {
 
 	case engine.SendLastWordsEffect:
 		b.sender.SendText(e.ChatID, fmt.Sprintf("🎤 @%s has the floor for last words...", b.getUsername(e.PlayerID)))
+
+	case engine.SendWhisperEffect:
+		fromName := b.getUsername(e.FromID)
+		b.sender.SendDM(int64(e.ToID), fmt.Sprintf("🤫 *Whisper from @%s:* %s", fromName, e.Message))
 
 	case engine.SendNominationKeyboardEffect:
 		// Handled via /nominate command, no keyboard needed

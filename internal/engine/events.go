@@ -115,6 +115,38 @@ type RoleDeliveryFailedEvent struct {
 
 func (RoleDeliveryFailedEvent) eventTag() {}
 
+// AccuseEvent — player publicly accuses another during discussion
+type AccuseEvent struct {
+	AccuserID PlayerID
+	TargetID  PlayerID
+}
+
+func (AccuseEvent) eventTag() {}
+
+// DefendEvent — player makes a public defense statement during discussion
+type DefendEvent struct {
+	PlayerID  PlayerID
+	Statement string
+}
+
+func (DefendEvent) eventTag() {}
+
+// WhisperEvent — player sends a private whisper to another (visible to both, logged for audit)
+type WhisperEvent struct {
+	FromID  PlayerID
+	ToID    PlayerID
+	Message string
+}
+
+func (WhisperEvent) eventTag() {}
+
+// PlayerSpokeEvent — tracks that a player spoke during discussion (for AFK detection)
+type PlayerSpokeEvent struct {
+	PlayerID PlayerID
+}
+
+func (PlayerSpokeEvent) eventTag() {}
+
 // Side effects emitted by the reducer for the transport layer to execute
 type SideEffect interface {
 	effectTag()
@@ -202,3 +234,18 @@ type SendLastWordsEffect struct {
 }
 
 func (SendLastWordsEffect) effectTag() {}
+
+type SendWhisperEffect struct {
+	FromID  PlayerID
+	ToID    PlayerID
+	Message string
+}
+
+func (SendWhisperEffect) effectTag() {}
+
+type SendAccusationSummaryEffect struct {
+	ChatID      int64
+	Accusations map[PlayerID]int // target -> count
+}
+
+func (SendAccusationSummaryEffect) effectTag() {}
