@@ -30,6 +30,17 @@ go run cmd/bot/main.go
 
 Collections created automatically: `games`, `waitlists`, `dm_confirmed`, `cooldowns`
 
+## Deploy on Render (Free Tier)
+
+Use a **Background Worker** (not Web Service) for 24/7 Telegram polling.
+
+1. Push this repo to GitHub
+2. Render → **New** → **Blueprint** → connect repo
+3. Set `TELEGRAM_BOT_TOKEN` and `MONGODB_URI` in the dashboard
+4. Deploy
+
+Full guide: [docs/DEPLOY_RENDER.md](docs/DEPLOY_RENDER.md)
+
 ## Commands
 
 | Command | Context | Description |

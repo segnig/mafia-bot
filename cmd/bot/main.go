@@ -1,10 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/segni/mafia-bot/internal/store"
@@ -12,9 +15,14 @@ import (
 )
 
 func main() {
-	// Load .env file if it exists
-	if err := godotenv.Load(); err != nil {
+	// .env is for local dev only; Render injects env vars via dashboard
+	if err := godotenv.Load(); err != nil && os.Getenv("RENDER") == "" {
 		log.Println("No .env file found, using environment variables")
+	}
+
+	if os.Getenv("RENDER") != "" {
+		log.SetFlags(log.LstdFlags | log.LUTC)
+		log.Println("Running on Render")
 	}
 
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
@@ -32,7 +40,7 @@ func main() {
 		dbName = "mafia_bot"
 	}
 
-	mongoStore, err := store.NewMongoStore(mongoURI, dbName)
+	mongoStore, err := connectMongoWithRetry(mongoURI, dbName, 5)
 	if err != nil {
 		log.Fatalf("Failed to connect to MongoDB Atlas: %v", err)
 	}
@@ -48,12 +56,60 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Println("Shutting down...")
+		log.Println("Shutting down gracefully...")
 		bot.Stop()
 		mongoStore.Close()
 		os.Exit(0)
 	}()
 
-	log.Println("Starting Mafia Bot...")
+	port := os.Getenv("PORT")
+	if port != "" {
+		// Web Service mode: health endpoint on PORT + bot in background.
+		// Not recommended on Render free (service sleeps). Use Background Worker instead.
+		go func() {
+			log.Println("Starting Telegram bot (background)...")
+			bot.Start()
+		}()
+		startHealthServer(port)
+		return
+	}
+
+	// Background Worker mode (recommended for Render free tier)
+	log.Println("Starting Mafia Bot (worker mode)...")
 	bot.Start()
+}
+
+func connectMongoWithRetry(uri, dbName string, attempts int) (*store.MongoStore, error) {
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		s, err := store.NewMongoStore(uri, dbName)
+		if err == nil {
+			return s, nil
+		}
+		lastErr = err
+		wait := time.Duration(i+1) * 3 * time.Second
+		log.Printf("MongoDB connect attempt %d/%d failed: %v (retry in %s)", i+1, attempts, err, wait)
+		time.Sleep(wait)
+	}
+	return nil, fmt.Errorf("after %d attempts: %w", attempts, lastErr)
+}
+
+func startHealthServer(port string) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("Mafia Bot is running"))
+	})
+
+	addr := ":" + port
+	log.Printf("Health server listening on %s (worker mode recommended for Render free)", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Fatalf("Health server failed: %v", err)
+	}
 }

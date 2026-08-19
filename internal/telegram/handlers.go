@@ -621,6 +621,8 @@ func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
 		b.handleVoteCallback(cq, parts)
 	case "join":
 		b.handleJoinCallback(cq, parts)
+	case "lobby":
+		b.handleLobbyCallback(cq, parts)
 	}
 }
 
@@ -721,6 +723,31 @@ func (b *Bot) handleJoinCallback(cq *tgbotapi.CallbackQuery, parts []string) {
 	})
 }
 
+func (b *Bot) handleLobbyCallback(cq *tgbotapi.CallbackQuery, parts []string) {
+	if len(parts) < 2 {
+		return
+	}
+	gameID := engine.GameID(parts[1])
+	ga := b.supervisor.GetGame(gameID)
+	if ga == nil {
+		return
+	}
+	state := ga.State()
+	if state.Phase != engine.PhaseLobby {
+		b.sender.SendText(cq.Message.Chat.ID, "This lobby has already started.")
+		return
+	}
+	players := make([]string, 0, len(state.Players))
+	for _, p := range state.Players {
+		players = append(players, p.Username)
+	}
+	hostName := ""
+	if h, ok := state.Players[state.HostID]; ok {
+		hostName = h.Username
+	}
+	b.sendLobbyCard(state.ChatID, state.ID, hostName, players, state.Config.MinPlayers, state.Config.MaxPlayers)
+}
+
 func (b *Bot) sendLobbyCard(chatID int64, gameID engine.GameID, hostName string, players []string, minPlayers, maxPlayers int) {
 	playerList := ""
 	for i, name := range players {
@@ -815,7 +842,7 @@ func (b *Bot) dispatchEffect(eff engine.SideEffect) {
 			state := ga.State()
 			if state.ChatID == e.ChatID {
 				kb := buildVotingKeyboard(state.ID, e.Targets, state.Players, e.AllowNoLynch)
-				b.sender.SendTextWithKeyboard(e.ChatID, "Vote for who to lynch:", kb)
+				b.sender.SendTextWithKeyboard(e.ChatID, "🗳️ *Day Vote*\nChoose one player below:", kb)
 				return
 			}
 		}
@@ -831,16 +858,16 @@ func (b *Bot) dispatchEffect(eff engine.SideEffect) {
 		switch e.Role {
 		case engine.RoleMafia, engine.RoleGodfather:
 			actionKind = engine.ActionMafiaKill
-			prompt = "🔪 Choose a player to eliminate tonight:"
+			prompt = "🔪 *Mafia Action*\nChoose a target to eliminate:"
 		case engine.RoleDetective:
 			actionKind = engine.ActionDetectiveCheck
-			prompt = "🔍 Choose a player to investigate:"
+			prompt = "🔍 *Detective Action*\nChoose one player to investigate:"
 		case engine.RoleDoctor:
 			actionKind = engine.ActionDoctorProtect
-			prompt = "💊 Choose a player to protect tonight:"
+			prompt = "💊 *Doctor Action*\nChoose one player to protect:"
 		case engine.RoleVigilante:
 			actionKind = engine.ActionVigilanteKill
-			prompt = "🔫 Choose a player to shoot (one-time use!):"
+			prompt = "🔫 *Vigilante Action*\nChoose one player to shoot (one-time ability):"
 		}
 		kb := buildNightActionKeyboard(e.GameID, e.Targets, state.Players, actionKind)
 		b.sender.SendDMWithKeyboard(int64(e.PlayerID), prompt, kb)

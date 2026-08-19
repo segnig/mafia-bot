@@ -1,5 +1,6 @@
 # Binaries
 mafia-bot
+bot
 *.exe
 
 # Environment
