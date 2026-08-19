@@ -16,8 +16,19 @@ internal/store/          - Persistence interface (in-memory impl included)
 
 ```bash
 export TELEGRAM_BOT_TOKEN="your-token-here"
+export MONGODB_URI="mongodb+srv://user:password@cluster.mongodb.net"
+export MONGODB_DB="mafia_bot"  # optional, defaults to "mafia_bot"
 go run cmd/bot/main.go
 ```
+
+### MongoDB Atlas Setup
+
+1. Create a free cluster at [MongoDB Atlas](https://cloud.mongodb.com)
+2. Create a database user with read/write access
+3. Whitelist your server IP (or use `0.0.0.0/0` for development)
+4. Copy the connection string and set it as `MONGODB_URI`
+
+Collections created automatically: `games`, `waitlists`, `dm_confirmed`, `cooldowns`
 
 ## Commands
 
