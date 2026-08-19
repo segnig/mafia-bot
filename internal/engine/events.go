@@ -249,3 +249,15 @@ type SendAccusationSummaryEffect struct {
 }
 
 func (SendAccusationSummaryEffect) effectTag() {}
+
+// SendLobbyStatusEffect — displays the lobby card with player list and join button
+type SendLobbyStatusEffect struct {
+	ChatID     int64
+	GameID     GameID
+	HostName   string
+	Players    []string // usernames of current players
+	MinPlayers int
+	MaxPlayers int
+}
+
+func (SendLobbyStatusEffect) effectTag() {}

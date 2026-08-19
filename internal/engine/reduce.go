@@ -78,7 +78,7 @@ func reduceJoin(gs *GameState, e JoinEvent) (*GameState, []SideEffect) {
 	gs.AppendLog("player_joined", map[string]interface{}{"player_id": e.PlayerID, "username": e.Username})
 
 	return gs, []SideEffect{
-		SendGroupEffect{gs.ChatID, fmt.Sprintf("✋ @%s joined! (%d/%d players)", e.Username, len(gs.Players), gs.Config.MaxPlayers)},
+		lobbyStatusEffect(gs),
 	}
 }
 
@@ -100,12 +100,32 @@ func reduceLeave(gs *GameState, e LeaveEvent) (*GameState, []SideEffect) {
 			hostMsg = fmt.Sprintf(" New host: @%s.", gs.Players[gs.HostID].Username)
 		}
 		return gs, []SideEffect{
-			SendGroupEffect{gs.ChatID, fmt.Sprintf("@%s left the lobby.%s (%d players)", p.Username, hostMsg, len(gs.Players))},
+			SendGroupEffect{gs.ChatID, fmt.Sprintf("@%s left the lobby.%s", p.Username, hostMsg)},
+			lobbyStatusEffect(gs),
 		}
 	}
 
 	return gs, []SideEffect{
-		SendGroupEffect{gs.ChatID, fmt.Sprintf("@%s left the lobby. (%d players)", p.Username, len(gs.Players))},
+		lobbyStatusEffect(gs),
+	}
+}
+
+func lobbyStatusEffect(gs *GameState) SideEffect {
+	players := make([]string, 0, len(gs.Players))
+	for _, p := range gs.Players {
+		players = append(players, p.Username)
+	}
+	hostName := ""
+	if host, ok := gs.Players[gs.HostID]; ok {
+		hostName = host.Username
+	}
+	return SendLobbyStatusEffect{
+		ChatID:     gs.ChatID,
+		GameID:     gs.ID,
+		HostName:   hostName,
+		Players:    players,
+		MinPlayers: gs.Config.MinPlayers,
+		MaxPlayers: gs.Config.MaxPlayers,
 	}
 }
 

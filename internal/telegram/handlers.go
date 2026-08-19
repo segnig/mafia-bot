@@ -220,14 +220,12 @@ func (b *Bot) cmdStartGame(msg *tgbotapi.Message) {
 
 	// Notify waitlisted players
 	if waitlist, err := b.store.GetWaitlist(msg.Chat.ID); err == nil && len(waitlist) > 0 {
-		b.sender.SendText(msg.Chat.ID, "A new game is starting! Waitlisted players: use /join now!")
+		b.sender.SendText(msg.Chat.ID, "📢 A new game is starting! Waitlisted players: tap Join below!")
 		_ = b.store.ClearWaitlist(msg.Chat.ID)
 	}
 
-	b.sender.SendText(msg.Chat.ID, fmt.Sprintf(
-		"🎮 *Mafia Game Started!*\nHost: @%s\nUse /join to enter (min %d, max %d players).\nHost: use /begin when ready.",
-		msg.From.UserName, cfg.MinPlayers, cfg.MaxPlayers,
-	))
+	// Show lobby card with join button
+	b.sendLobbyCard(msg.Chat.ID, gameID, msg.From.UserName, []string{msg.From.UserName}, cfg.MinPlayers, cfg.MaxPlayers)
 }
 
 func (b *Bot) cmdJoin(msg *tgbotapi.Message) {
@@ -683,6 +681,34 @@ func (b *Bot) handleJoinCallback(cq *tgbotapi.CallbackQuery, parts []string) {
 	})
 }
 
+func (b *Bot) sendLobbyCard(chatID int64, gameID engine.GameID, hostName string, players []string, minPlayers, maxPlayers int) {
+	playerList := ""
+	for i, name := range players {
+		playerList += fmt.Sprintf("%d. @%s\n", i+1, name)
+	}
+
+	readyStatus := "❌ Not enough players"
+	if len(players) >= minPlayers {
+		readyStatus = "✅ Ready to start! Host: use /begin"
+	}
+
+	text := fmt.Sprintf(
+		"🎮 *MAFIA — Game Lobby*\n"+
+			"━━━━━━━━━━━━━━━━━━━━\n"+
+			"👑 Host: @%s\n"+
+			"👥 Players: %d/%d\n"+
+			"━━━━━━━━━━━━━━━━━━━━\n"+
+			"\n%s\n"+
+			"━━━━━━━━━━━━━━━━━━━━\n"+
+			"%s\n"+
+			"\n_Tap the button below to join!_",
+		hostName, len(players), maxPlayers, playerList, readyStatus,
+	)
+
+	kb := buildJoinButton(gameID)
+	b.sender.SendTextWithKeyboard(chatID, text, kb)
+}
+
 func (b *Bot) trackDiscussionActivity(msg *tgbotapi.Message) {
 	gameID := engine.GameID(fmt.Sprintf("%d", msg.Chat.ID))
 	ga := b.supervisor.GetGame(gameID)
@@ -778,6 +804,9 @@ func (b *Bot) dispatchEffect(eff engine.SideEffect) {
 		}
 		kb := buildNightActionKeyboard(e.GameID, e.Targets, state.Players, actionKind)
 		b.sender.SendDMWithKeyboard(int64(e.PlayerID), prompt, kb)
+
+	case engine.SendLobbyStatusEffect:
+		b.sendLobbyCard(e.ChatID, e.GameID, e.HostName, e.Players, e.MinPlayers, e.MaxPlayers)
 
 	case engine.SendLastWordsEffect:
 		b.sender.SendText(e.ChatID, fmt.Sprintf("🎤 @%s has the floor for last words...", b.getUsername(e.PlayerID)))
