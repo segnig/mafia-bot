@@ -523,18 +523,58 @@ func (b *Bot) cmdStatus(msg *tgbotapi.Message) {
 	}
 
 	state := ga.State()
-	alive := state.AlivePlayers()
-	dead := 0
+
+	// During lobby, show the lobby card
+	if state.Phase == engine.PhaseLobby {
+		players := make([]string, 0, len(state.Players))
+		for _, p := range state.Players {
+			players = append(players, p.Username)
+		}
+		hostName := ""
+		if h, ok := state.Players[state.HostID]; ok {
+			hostName = h.Username
+		}
+		b.sendLobbyCard(msg.Chat.ID, state.ID, hostName, players, state.Config.MinPlayers, state.Config.MaxPlayers)
+		return
+	}
+
+	// During game, show detailed status
+	var aliveList, deadList string
 	for _, p := range state.Players {
-		if !p.Alive {
-			dead++
+		if p.Alive {
+			status := "🟢"
+			if p.Disconnected {
+				status = "📵"
+			}
+			aliveList += fmt.Sprintf("  %s @%s\n", status, p.Username)
+		} else {
+			role := ""
+			if state.Config.RevealRoleOnDeath {
+				role = fmt.Sprintf(" (%s)", p.Role)
+			}
+			deadList += fmt.Sprintf("  💀 @%s%s\n", p.Username, role)
 		}
 	}
 
-	b.sender.SendText(msg.Chat.ID, fmt.Sprintf(
-		"📊 *Game Status*\nPhase: %s (Day %d)\nAlive: %d | Dead: %d",
-		state.Phase, state.DayNumber, len(alive), dead,
-	))
+	text := fmt.Sprintf(
+		"📊 *Game Status*\n"+
+			"━━━━━━━━━━━━━━━━━━━━\n"+
+			"📍 Phase: *%s*\n"+
+			"📅 Day: %d\n"+
+			"👑 Host: @%s\n"+
+			"━━━━━━━━━━━━━━━━━━━━\n"+
+			"*Alive (%d):*\n%s"+
+			"━━━━━━━━━━━━━━━━━━━━\n",
+		state.Phase, state.DayNumber,
+		b.getUsername(state.HostID),
+		len(state.AlivePlayers()), aliveList,
+	)
+
+	if deadList != "" {
+		text += fmt.Sprintf("*Dead:*\n%s━━━━━━━━━━━━━━━━━━━━\n", deadList)
+	}
+
+	b.sender.SendText(msg.Chat.ID, text)
 }
 
 func (b *Bot) cmdMyRole(msg *tgbotapi.Message) {
