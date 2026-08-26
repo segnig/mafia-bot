@@ -12,10 +12,13 @@ func buildNightActionKeyboard(gameID engine.GameID, targets []engine.PlayerID, p
 	// Use 2-column layout for faster scanning on mobile.
 	currentRow := []tgbotapi.InlineKeyboardButton{}
 	for i, pid := range targets {
-		p := players[pid]
+		p, ok := players[pid]
+		if !ok {
+			continue
+		}
 		callbackData := fmt.Sprintf("night:%s:%s:%d", gameID, actionKind, pid)
 		btn := tgbotapi.NewInlineKeyboardButtonData(
-			fmt.Sprintf("%d) %s", i+1, p.Username),
+			fmt.Sprintf("%d) %s", i+1, p.PlainName()),
 			callbackData,
 		)
 		currentRow = append(currentRow, btn)
@@ -34,10 +37,13 @@ func buildVotingKeyboard(gameID engine.GameID, targets []engine.PlayerID, player
 	var rows [][]tgbotapi.InlineKeyboardButton
 	currentRow := []tgbotapi.InlineKeyboardButton{}
 	for i, pid := range targets {
-		p := players[pid]
+		p, ok := players[pid]
+		if !ok {
+			continue
+		}
 		callbackData := fmt.Sprintf("vote:%s:%d", gameID, pid)
 		btn := tgbotapi.NewInlineKeyboardButtonData(
-			fmt.Sprintf("%d) %s", i+1, p.Username),
+			fmt.Sprintf("%d) %s", i+1, p.PlainName()),
 			callbackData,
 		)
 		currentRow = append(currentRow, btn)

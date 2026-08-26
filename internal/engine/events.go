@@ -8,9 +8,10 @@ type Event interface {
 }
 
 type JoinEvent struct {
-	PlayerID PlayerID
-	Username string
-	Time     time.Time
+	PlayerID    PlayerID
+	Username    string
+	DisplayName string
+	Time        time.Time
 }
 
 func (JoinEvent) eventTag() {}
@@ -21,8 +22,21 @@ type LeaveEvent struct {
 
 func (LeaveEvent) eventTag() {}
 
+// GameCreatedEvent is sent once after the actor starts so the lobby gets its
+// deadline, its countdown timer, and its first status card from the reducer.
+type GameCreatedEvent struct{}
+
+func (GameCreatedEvent) eventTag() {}
+
+// ResumeEvent re-arms timers and re-sends the prompts for the current phase.
+// Used after a restart, where timers only ever lived in memory.
+type ResumeEvent struct{}
+
+func (ResumeEvent) eventTag() {}
+
 type BeginEvent struct {
 	PlayerID PlayerID
+	IsAdmin  bool
 }
 
 func (BeginEvent) eventTag() {}
@@ -52,6 +66,8 @@ type TimeoutEvent struct {
 
 func (TimeoutEvent) eventTag() {}
 
+// RolesDeliveredEvent is dispatched by the transport once every role DM for
+// this game has been handed to the sender.
 type RolesDeliveredEvent struct{}
 
 func (RolesDeliveredEvent) eventTag() {}
@@ -81,7 +97,7 @@ func (NominateEvent) eventTag() {}
 
 // SecondEvent — a player seconds an existing nomination
 type SecondEvent struct {
-	PlayerID     PlayerID
+	PlayerID         PlayerID
 	NominationTarget PlayerID
 }
 
@@ -96,6 +112,7 @@ func (LastWordsCompleteEvent) eventTag() {}
 type HostTransferEvent struct {
 	FromPlayerID PlayerID
 	ToPlayerID   PlayerID
+	IsAdmin      bool
 }
 
 func (HostTransferEvent) eventTag() {}
@@ -104,6 +121,7 @@ func (HostTransferEvent) eventTag() {}
 type KickEvent struct {
 	HostID   PlayerID
 	TargetID PlayerID
+	IsAdmin  bool
 }
 
 func (KickEvent) eventTag() {}
@@ -159,6 +177,18 @@ type SendDMEffect struct {
 
 func (SendDMEffect) effectTag() {}
 
+// SendRoleDMEffect is a role assignment DM. It is distinct from SendDMEffect
+// because the transport has to know when these specific messages have actually
+// been delivered: that is what closes the role-assignment phase, and a failure
+// means the role has to be redealt rather than the player merely muted.
+type SendRoleDMEffect struct {
+	GameID   GameID
+	PlayerID PlayerID
+	Text     string
+}
+
+func (SendRoleDMEffect) effectTag() {}
+
 type SendGroupEffect struct {
 	ChatID int64
 	Text   string
@@ -168,8 +198,10 @@ func (SendGroupEffect) effectTag() {}
 
 type SendVotingKeyboardEffect struct {
 	ChatID       int64
+	GameID       GameID
 	Targets      []PlayerID
 	AllowNoLynch bool
+	Prompt       string
 }
 
 func (SendVotingKeyboardEffect) effectTag() {}
@@ -198,64 +230,28 @@ type SetWarningTimerEffect struct {
 
 func (SetWarningTimerEffect) effectTag() {}
 
+// RolesDeliveredEffect closes the role-assignment phase. The transport turns
+// it back into a RolesDeliveredEvent once the preceding role DMs have been
+// queued, which is what advances the game into Night 1.
+type RolesDeliveredEffect struct {
+	GameID GameID
+}
+
+func (RolesDeliveredEffect) effectTag() {}
+
 type GameOverEffect struct {
+	GameID GameID
 	Result WinResult
 }
 
 func (GameOverEffect) effectTag() {}
-
-type RemovePlayerEffect struct {
-	PlayerID PlayerID
-	GameID   GameID
-	Reason   string
-}
-
-func (RemovePlayerEffect) effectTag() {}
-
-type SendNominationKeyboardEffect struct {
-	ChatID  int64
-	Targets []PlayerID
-	GameID  GameID
-}
-
-func (SendNominationKeyboardEffect) effectTag() {}
-
-type SendTrialEffect struct {
-	ChatID   int64
-	Accused  PlayerID
-	GameID   GameID
-}
-
-func (SendTrialEffect) effectTag() {}
-
-type SendLastWordsEffect struct {
-	ChatID   int64
-	PlayerID PlayerID
-}
-
-func (SendLastWordsEffect) effectTag() {}
-
-type SendWhisperEffect struct {
-	FromID  PlayerID
-	ToID    PlayerID
-	Message string
-}
-
-func (SendWhisperEffect) effectTag() {}
-
-type SendAccusationSummaryEffect struct {
-	ChatID      int64
-	Accusations map[PlayerID]int // target -> count
-}
-
-func (SendAccusationSummaryEffect) effectTag() {}
 
 // SendLobbyStatusEffect — displays the lobby card with player list and join button
 type SendLobbyStatusEffect struct {
 	ChatID     int64
 	GameID     GameID
 	HostName   string
-	Players    []string // usernames of current players
+	Players    []string // display names of current players
 	MinPlayers int
 	MaxPlayers int
 }

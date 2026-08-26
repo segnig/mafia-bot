@@ -266,6 +266,7 @@ func TestReduceVoteWithLastWords(t *testing.T) {
 
 func TestCheckWinConditionTownWins(t *testing.T) {
 	gs := NewGameState("test", 123, 1, DefaultConfig())
+	gs.Phase = PhaseDiscussion // win conditions only apply to a started game
 	gs.Players[1] = &Player{ID: 1, Role: RoleMafia, Alive: false}
 	gs.Players[2] = &Player{ID: 2, Role: RoleVillager, Alive: true}
 	gs.Players[3] = &Player{ID: 3, Role: RoleVillager, Alive: true}
@@ -278,6 +279,7 @@ func TestCheckWinConditionTownWins(t *testing.T) {
 
 func TestCheckWinConditionMafiaWins(t *testing.T) {
 	gs := NewGameState("test", 123, 1, DefaultConfig())
+	gs.Phase = PhaseDiscussion // win conditions only apply to a started game
 	gs.Players[1] = &Player{ID: 1, Role: RoleMafia, Alive: true}
 	gs.Players[2] = &Player{ID: 2, Role: RoleVillager, Alive: true}
 	gs.Players[3] = &Player{ID: 3, Role: RoleVillager, Alive: false}

@@ -161,18 +161,40 @@ type GameState struct {
 }
 
 type GameConfig struct {
-    MinPlayers        int
-    MaxPlayers         int
-    LobbyTimeoutSec    int
-    NightTimeoutSec    int
+    MinPlayers           int
+    MaxPlayers           int
+    LobbyTimeoutSec      int
+    RoleAssignTimeoutSec int // backstop if the role-delivery ack never arrives
+    NightTimeoutSec      int
     DiscussionTimeoutSec int
-    VotingTimeoutSec   int
-    RevealRoleOnDeath  bool
-    AllowNoLynch       bool
-    MafiaRatioDivisor  int              // default 4 — used by ComputeMafiaCount (n / divisor)
-    OptionalRoles      []RoleDefinition // the tunable registry from §5.2.2 (weights, thresholds)
-    SpecialRoleDivisor int              // default 3 — used by SpecialRoleBudget (n / divisor)
+    NominationTimeoutSec int // time to second a nomination before the day ends
+    VotingTimeoutSec     int
+    LastWordsSec         int
+
+    // Split per §9 below: reveal on lynch, hide night kills.
+    RevealOnLynch     bool
+    RevealOnNightKill bool
+
+    AllowNoLynch          bool
+    LynchRequiresMajority bool // more than half the eligible voters must agree
+    MafiaRatioDivisor     int              // default 4 — used by ComputeMafiaCount (n / divisor)
+    OptionalRoles         []RoleDefinition // the tunable registry from §5.2.2 (weights, thresholds)
+    SpecialRoleDivisor    int              // default 3 — used by SpecialRoleBudget (n / divisor)
+    DoctorSelfProtect     bool
+    FirstNightKill        bool
+    NominationSystem      bool
+    AllowLastWords        bool
+    // SimultaneousNightActions treats the night as one instant, so a player
+    // killed during it still completes their own action.
+    SimultaneousNightActions bool
 }
+```
+
+Every non-terminal phase must have a non-zero timeout; `ValidateConfig` rejects a
+config that would let the game park in a phase with nothing scheduled to move it
+along.
+
+```go
 
 type GameEvent struct {
     Timestamp time.Time
@@ -493,7 +515,7 @@ func weightedRandomIndex(pool []RoleDefinition, totalWeight float64, rng io.Read
 
 ### 5.4 Role Reveal
 
-- On elimination (night or lynch), whether to reveal the dead player's role is a config flag (`RevealRoleOnDeath`). Revealing adds information for the town but reduces mystery — most competitive groups play with reveal ON for lynches, OFF for night kills (classic "you wake up and X is dead" ambiguity).
+- On elimination, whether to reveal the dead player's role is controlled by two independent flags, `RevealOnLynch` and `RevealOnNightKill`. Revealing adds information for the town but reduces mystery — most competitive groups play with reveal ON for lynches and OFF for night kills (the classic "you wake up and X is dead" ambiguity), which is the default. Each player carries a `RoleRevealed` flag so later summaries echo what was actually made public rather than re-deriving the rule.
 
 ---
 
@@ -519,7 +541,7 @@ All destructive commands (`/endgame`) should require confirmation or be host/adm
 
 | Phase | Default duration | On expiry |
 |---|---|---|
-| Lobby | 120s (configurable, or manual `/begin`) | Auto-begin if `MinPlayers` met, else cancel game |
+| Lobby | 300s (configurable, or manual `/begin`) | Auto-begin if `MinPlayers` met, else cancel game |
 | Role assignment | 30s per player (parallel, so ~30s total with a grace buffer) | Proceed with whoever confirmed; missing players default to no-action |
 | Night | 60–90s | Resolve with whatever actions were submitted; missing mafia vote = random target among submitted mafia votes, or no kill if none submitted (configurable) |
 | Discussion | 90–120s | Auto-advance to voting |

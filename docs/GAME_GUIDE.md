@@ -16,6 +16,8 @@ Mafia (also called Werewolf) is a social deduction game. The town is infiltrated
 4. Others type `/join` to enter the lobby (minimum 5 players)
 5. The host types `/begin` when enough players have joined
 
+A lobby stays open for 5 minutes. If enough players have joined by then it starts on its own; otherwise it is cancelled so it doesn't linger in the chat.
+
 ### Game Flow
 
 ```
@@ -132,7 +134,7 @@ After discussion ends, the bot posts voting buttons. You can:
 - **Vote "No Lynch"** — spare everyone (if enabled)
 - **Change your vote** — tap a different button before time runs out
 
-The player with the most votes is lynched. On a tie, no one is lynched.
+A lynch needs a **majority of the players who can still vote** — more than half. So with 8 players alive, 5 votes are required. If the leading player falls short, or the vote ties, nobody is lynched that day. Players who have gone silent (blocked the bot or left the chat) don't count toward the total, so one dropout can't stall the round.
 
 ### Last Words
 When a player is voted out, they get 15 seconds to say their final words before execution. Use this to reveal information, make accusations, or go out with flair!
@@ -158,9 +160,12 @@ The host can configure these options (set before `/begin`):
 | First Night Kill | On | If off, Mafia can't kill on Night 1 |
 | Nomination System | Off | If on, requires `/nominate` + `/second` before voting |
 | Allow No Lynch | On | Whether "No Lynch" is a voting option |
-| Reveal Role on Death | On | Show dead player's role publicly |
+| Lynch Requires Majority | On | If off, a plurality is enough to execute |
+| Reveal on Lynch | On | Show a lynched player's role publicly |
+| Reveal on Night Kill | Off | Show a night victim's role publicly |
 | Last Words | On | Give lynched player time to speak |
 | Doctor Self-Protect | Off | Whether Doctor can protect themselves |
+| Simultaneous Night Actions | On | If off, a player killed at night loses their own action |
 
 ---
 

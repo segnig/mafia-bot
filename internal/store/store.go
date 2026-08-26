@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/segni/mafia-bot/internal/engine"
 )
@@ -30,13 +31,16 @@ type Store interface {
 	HasJoinCooldown(chatID int64, playerID engine.PlayerID) (bool, error)
 }
 
+// joinCooldownTTL matches the TTL index used by the Mongo store.
+const joinCooldownTTL = 30 * time.Second
+
 // MemoryStore is an in-memory implementation for development and testing.
 type MemoryStore struct {
 	mu          sync.RWMutex
 	games       map[engine.GameID][]byte
 	waitlists   map[int64][]engine.PlayerID
 	dmConfirmed map[engine.PlayerID]bool
-	cooldowns   map[string]bool
+	cooldowns   map[string]time.Time
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -44,7 +48,7 @@ func NewMemoryStore() *MemoryStore {
 		games:       make(map[engine.GameID][]byte),
 		waitlists:   make(map[int64][]engine.PlayerID),
 		dmConfirmed: make(map[engine.PlayerID]bool),
-		cooldowns:   make(map[string]bool),
+		cooldowns:   make(map[string]time.Time),
 	}
 }
 
@@ -84,7 +88,14 @@ func (m *MemoryStore) ListActive() ([]engine.GameID, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	ids := make([]engine.GameID, 0, len(m.games))
-	for id := range m.games {
+	for id, data := range m.games {
+		var state engine.GameState
+		if err := json.Unmarshal(data, &state); err != nil {
+			continue
+		}
+		if state.Phase.IsTerminal() {
+			continue
+		}
 		ids = append(ids, id)
 	}
 	return ids, nil
@@ -131,14 +142,26 @@ func (m *MemoryStore) IsDMConfirmed(playerID engine.PlayerID) (bool, error) {
 func (m *MemoryStore) SetJoinCooldown(chatID int64, playerID engine.PlayerID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	key := fmt.Sprintf("%d:%d", chatID, playerID)
-	m.cooldowns[key] = true
+	m.cooldowns[cooldownKey(chatID, playerID)] = time.Now().Add(joinCooldownTTL)
 	return nil
 }
 
 func (m *MemoryStore) HasJoinCooldown(chatID int64, playerID engine.PlayerID) (bool, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	key := fmt.Sprintf("%d:%d", chatID, playerID)
-	return m.cooldowns[key], nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := cooldownKey(chatID, playerID)
+	expiry, ok := m.cooldowns[key]
+	if !ok {
+		return false, nil
+	}
+	// Without expiry a rejected player would be muted for the whole session.
+	if time.Now().After(expiry) {
+		delete(m.cooldowns, key)
+		return false, nil
+	}
+	return true, nil
+}
+
+func cooldownKey(chatID int64, playerID engine.PlayerID) string {
+	return fmt.Sprintf("%d:%d", chatID, playerID)
 }
