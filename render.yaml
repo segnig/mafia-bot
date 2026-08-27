@@ -1,18 +1,23 @@
-# Render Blueprint — free tier
+# Render Blueprint — webhook (Web Service)
 # Deploy: connect this repo in Render Dashboard → New → Blueprint
 #
-# Uses a Background Worker (recommended for Telegram long-polling bots).
-# Web Services on the free plan sleep after inactivity; workers stay running
-# within the 750 free instance-hours/month limit.
+# Telegram sends updates to POST /telegram/webhook. Render injects
+# RENDER_EXTERNAL_URL, which the bot uses as the webhook origin unless
+# WEBHOOK_URL is set explicitly.
+#
+# Free web services sleep after ~15 minutes idle. A Telegram update wakes
+# them (cold start); in-progress games resume from MongoDB. For reliable
+# night/day timers, use a paid instance that does not sleep.
 
 services:
-  - type: worker
+  - type: web
     name: mafia-bot
     runtime: go
     plan: free
     region: oregon
     buildCommand: go build -ldflags="-s -w" -o bot ./cmd/bot
     startCommand: ./bot
+    healthCheckPath: /health
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
@@ -20,5 +25,7 @@ services:
         sync: false
       - key: MONGODB_DB
         value: mafia_bot
+      - key: WEBHOOK_SECRET
+        sync: false
       - key: RENDER
         value: "true"

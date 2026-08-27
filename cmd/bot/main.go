@@ -3,9 +3,9 @@ package main
 import (
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -62,21 +62,32 @@ func main() {
 		os.Exit(0)
 	}()
 
-	port := os.Getenv("PORT")
-	if port != "" {
-		// Web Service mode: health endpoint on PORT + bot in background.
-		// Not recommended on Render free (service sleeps). Use Background Worker instead.
-		go func() {
-			log.Println("Starting Telegram bot (background)...")
-			bot.Start()
-		}()
-		startHealthServer(port)
-		return
+	cfg := listenConfigFromEnv()
+	if cfg.WebhookURL != "" {
+		log.Println("Starting Mafia Bot (webhook mode)...")
+	} else {
+		log.Println("Starting Mafia Bot (polling mode — set WEBHOOK_URL for production)")
 	}
+	if err := bot.Start(cfg); err != nil {
+		log.Fatalf("bot stopped: %v", err)
+	}
+}
 
-	// Background Worker mode (recommended for Render free tier)
-	log.Println("Starting Mafia Bot (worker mode)...")
-	bot.Start()
+func listenConfigFromEnv() telegram.ListenConfig {
+	cfg := telegram.ListenConfig{
+		Secret:     os.Getenv("WEBHOOK_SECRET"),
+		WebhookURL: strings.TrimRight(os.Getenv("WEBHOOK_URL"), "/"),
+	}
+	if cfg.WebhookURL == "" {
+		// Render web services expose this automatically.
+		cfg.WebhookURL = strings.TrimRight(os.Getenv("RENDER_EXTERNAL_URL"), "/")
+	}
+	if port := os.Getenv("PORT"); port != "" {
+		cfg.Addr = ":" + port
+	} else if cfg.WebhookURL != "" {
+		cfg.Addr = ":8080"
+	}
+	return cfg
 }
 
 func connectMongoWithRetry(uri, dbName string, attempts int) (*store.MongoStore, error) {
@@ -92,24 +103,4 @@ func connectMongoWithRetry(uri, dbName string, attempts int) (*store.MongoStore,
 		time.Sleep(wait)
 	}
 	return nil, fmt.Errorf("after %d attempts: %w", attempts, lastErr)
-}
-
-func startHealthServer(port string) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("Mafia Bot is running"))
-	})
-
-	addr := ":" + port
-	log.Printf("Health server listening on %s (worker mode recommended for Render free)", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("Health server failed: %v", err)
-	}
 }

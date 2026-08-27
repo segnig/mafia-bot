@@ -1,8 +1,10 @@
 package telegram
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +23,7 @@ type Bot struct {
 	outbox       chan actor.OutgoingMessage
 	roleDelivery *roleDeliveryTracker
 	boards       *boardTracker
+	httpServer   *http.Server
 }
 
 func NewBot(token string, st store.Store) (*Bot, error) {
@@ -173,40 +176,61 @@ func (b *Bot) recoverGames() {
 	}
 }
 
-func (b *Bot) Start() {
+func (b *Bot) Start(cfg ListenConfig) error {
+	log.Printf("Bot started as @%s", b.api.Self.UserName)
+	if cfg.WebhookURL != "" {
+		return b.serveWebhook(cfg)
+	}
+	return b.poll()
+}
+
+func (b *Bot) poll() error {
+	if _, err := b.api.Request(tgbotapi.DeleteWebhookConfig{}); err != nil {
+		log.Printf("deleteWebhook: %v (GetUpdates will fail if a webhook is still registered)", err)
+	}
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 	updates := b.api.GetUpdatesChan(u)
-
-	log.Printf("Bot started as @%s", b.api.Self.UserName)
-
 	for update := range updates {
-		if update.CallbackQuery != nil {
-			b.handleCallback(update.CallbackQuery)
-			continue
-		}
-		if update.Message == nil {
-			continue
-		}
-		if update.Message.LeftChatMember != nil {
-			b.handleLeftChatMember(update.Message)
-			continue
-		}
-		if update.Message.IsCommand() {
-			b.handleCommand(update.Message)
-			continue
-		}
-		if update.Message.Chat.IsPrivate() {
-			b.handleDMStart(update.Message)
-		} else {
-			b.trackDiscussionActivity(update.Message)
-		}
+		b.dispatchUpdate(update)
 	}
+	return nil
+}
+
+func (b *Bot) dispatchUpdate(update tgbotapi.Update) {
+	if update.CallbackQuery != nil {
+		b.handleCallback(update.CallbackQuery)
+		return
+	}
+	if update.Message == nil {
+		return
+	}
+	if update.Message.LeftChatMember != nil {
+		b.handleLeftChatMember(update.Message)
+		return
+	}
+	if update.Message.IsCommand() {
+		b.handleCommand(update.Message)
+		return
+	}
+	if update.Message.Chat.IsPrivate() {
+		b.handleDMStart(update.Message)
+		return
+	}
+	b.trackDiscussionActivity(update.Message)
 }
 
 // Stop drains running games before shutting the sender down, so a redeploy
 // leaves every game in a state that recovery can pick up.
 func (b *Bot) Stop() {
+	if b.httpServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := b.httpServer.Shutdown(ctx); err != nil {
+			log.Printf("webhook server shutdown: %v", err)
+		}
+		cancel()
+	}
 	b.supervisor.Shutdown(10 * time.Second)
 	b.sender.Stop()
 }
@@ -303,8 +327,7 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 	}
 }
 
-func (b *Bot) cmdHelp(msg *tgbotapi.Message) {
-	b.sender.SendText(msg.Chat.ID, `🎭 *Mafia Bot*
+const helpText = `🎭 *Mafia Bot*
 
 *Setup*
 /startgame — open a lobby
@@ -335,7 +358,10 @@ func (b *Bot) cmdHelp(msg *tgbotapi.Message) {
 /lastgame — recap of the previous game
 /host @player — hand over hosting
 /kick @player — host or admin removes a player
-/endgame — host or admin ends the game`)
+/endgame — host or admin ends the game`
+
+func (b *Bot) cmdHelp(msg *tgbotapi.Message) {
+	b.sender.SendText(msg.Chat.ID, helpText)
 }
 
 func (b *Bot) cmdRoles(msg *tgbotapi.Message) {
@@ -560,16 +586,12 @@ func (b *Bot) extractTargetPlayer(msg *tgbotapi.Message, ga *actor.GameActor) en
 			return engine.PlayerID(entity.User.ID)
 		}
 		if entity.Type == "mention" {
-			runes := []rune(msg.Text)
-			if entity.Offset+entity.Length > len(runes) {
+			username := usernameFromMention(msg.Text, entity.Offset, entity.Length)
+			if username == "" {
 				continue
 			}
-			username := string(runes[entity.Offset+1 : entity.Offset+entity.Length])
-			state := ga.State()
-			for _, p := range state.Players {
-				if strings.EqualFold(p.Username, username) {
-					return p.ID
-				}
+			if id := lookupPlayerByUsername(ga.State().Players, username); id != 0 {
+				return id
 			}
 		}
 	}
@@ -615,18 +637,7 @@ func (b *Bot) cmdWhisper(msg *tgbotapi.Message) {
 	}
 
 	targetID := b.extractTargetPlayer(msg, ga)
-	args := strings.TrimSpace(msg.CommandArguments())
-
-	// Strip the leading @mention, whatever form it took, to get the body.
-	body := args
-	if strings.HasPrefix(body, "@") {
-		parts := strings.SplitN(body, " ", 2)
-		if len(parts) == 2 {
-			body = strings.TrimSpace(parts[1])
-		} else {
-			body = ""
-		}
-	}
+	body := whisperBody(msg.CommandArguments())
 
 	if targetID == 0 || body == "" {
 		b.sender.SendText(msg.Chat.ID, "Usage: /whisper @player your secret message")

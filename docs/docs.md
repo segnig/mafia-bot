@@ -587,6 +587,8 @@ func weightedRandomIndex(pool []RoleDefinition, totalWeight float64, rng io.Read
 
 All destructive commands (`/endgame`) should require confirmation or be host/admin-gated to prevent griefing. `/settings` is gated to group admins and the current host, so one player cannot rewrite the ruleset on everybody else.
 
+Production receives updates by **webhook** (`POST /telegram/webhook`, Telegram `secret_token`). Local runs without `WEBHOOK_URL` delete the webhook and long-poll. The reducer never sees the difference: both paths call the same `dispatchUpdate`.
+
 Every callback payload carries its `GameID` (or `ChatID` for the settings and
 rematch panels) and must stay inside Telegram's 64-byte limit, or the button is
 silently dead in the chat. `TestEveryCallbackFitsTelegramsLimit` and
@@ -766,6 +768,7 @@ mafia-bot/
 │   │   └── format.go        # stat cards, leaderboards, recaps, GameRecord
 │   ├── telegram/        # transport layer: handlers, keyboards, message formatting
 │   │   ├── handlers.go      # command routing and effect dispatch
+│   │   ├── webhook.go       # HTTPS webhook (setWebhook + secret_token) or polling
 │   │   ├── stats_cmd.go     # stats commands and the settings panel
 │   │   ├── keyboards.go     # every inline keyboard
 │   │   ├── boards.go        # message IDs of the messages edited in place

@@ -20,11 +20,18 @@ Depending on the group's settings there may also be a **Serial Killer** hunting 
 
 The lobby card shows the host, the current player list, a fill bar, and which **mode** the game will use, so you know what you are joining before it starts. It stays open for 5 minutes — if enough players have joined by then it starts on its own, otherwise it is cancelled so it doesn't linger in the chat.
 
+Everyone must have DMed the bot `/start` **before** `/begin`. If someone blocked the bot, they are removed and the roles are dealt again without them. If a message simply fails to send, they stay in the game but are marked silent (📵 on `/status`) and cannot act.
+
 ### Game Flow
 
 ```
-LOBBY → NIGHT → DAY DISCUSSION → VOTING → NIGHT → ... → GAME OVER
+LOBBY → ROLE DMs → NIGHT → DAY DISCUSSION → (trial) → VOTING → last words → NIGHT → … → GAME OVER
 ```
+
+**✉️ Role assignment**
+- The bot DMs everyone their role (and mafia teammates, and lovers) before Night 1
+- The night does not start until those DMs have actually gone out
+- If the bot restarts here, you get the same role again — a second copy is nothing to worry about
 
 **🌙 Night Phase**
 - The group goes quiet
@@ -34,7 +41,9 @@ LOBBY → NIGHT → DAY DISCUSSION → VOTING → NIGHT → ... → GAME OVER
 
 **☀️ Day Phase**
 - *Discussion* — debate, accuse, defend, whisper, and tap the mood bar
+- *Trial mode* (optional) — `/nominate` then `/second` to put someone on trial
 - *Voting* — one vote board that updates in place as ballots come in
+- *Last words* — a lynched player gets a few seconds before they are gone
 
 ---
 
@@ -104,13 +113,13 @@ Two games with the same players can have completely different compositions. The 
 | `/graveyard` | Anyone | The dead, in the order they died |
 | `/roles` | Anyone | Full role reference |
 | `/settings` | Host/Admin | Open the settings panel |
-| `/accuse @player` | Alive | Publicly accuse someone |
-| `/defend [text]` | Alive | Your defence statement (once per day) |
-| `/whisper @player [msg]` | Alive | Private message — the group sees that it happened |
+| `/accuse @player` | Alive & reachable | Publicly accuse someone (or reply to their message) |
+| `/defend [text]` | Alive & reachable | Your defence statement (once per day) |
+| `/whisper @player [msg]` | Alive & reachable | Private message — or reply to them; the group sees that it happened |
 | `/reveal` | Mayor | Go public in exchange for vote weight |
-| `/nominate` / `/second` | Alive | Put someone on trial (trial mode only) |
-| `/host @player` | Host | Transfer host |
-| `/kick @player` | Host | Remove an AFK player |
+| `/nominate` / `/second` | Alive & reachable | Put someone on trial (trial mode only) |
+| `/host @player` | Host/Admin | Transfer host |
+| `/kick @player` | Host/Admin | Remove an AFK player |
 
 ### Stats & History
 
@@ -146,7 +155,9 @@ Publicly point the finger. The bot tracks accusations and shows a tally. If a ma
 A formal statement the bot displays prominently. **One per day** — make it count.
 
 ### 🤫 Whisper (`/whisper @player trust me, vote Bob`)
-A private DM to another player. **The group is told that you whispered to them**, though not what you said. Instant suspicion, visible alliances.
+A private DM to another player. You can also **reply** to their message and type `/whisper your secret`. **The group is told that you whispered to them**, though not what you said. Instant suspicion, visible alliances.
+
+A player the bot cannot reach (blocked, left, 📵 on `/status`) cannot send or receive whispers, and cannot accuse, defend, nominate, or second. They can still be nominated and lynched.
 
 ### 🎭 React
 Tap the mood bar under the day announcement. The tally appears in the day summary. One reaction each; you can change it.
@@ -250,10 +261,13 @@ A combination that couldn't produce a playable game is refused rather than saved
 A: DM the bot first and send `/start`. Telegram doesn't allow bots to message users who haven't initiated contact.
 
 **Q: Can I be in multiple games at once?**
-A: Yes. Games are tracked per group chat, and every DM button carries which game it belongs to.
+A: Yes, in different groups. Night-action buttons always belong to one game. `/myrole`, `/mafia`, and `/ghost` go to the first active game the bot finds you in, so stick to one table if you can.
 
 **Q: What happens if someone goes AFK?**
-A: Their night action defaults to no action, and the night warning names who is still missing. The host can `/kick` them. Silent players are called out in the day summary.
+A: Their night action defaults to no action, and the night warning names who is still missing. The host or a group admin can `/kick` them. Silent players are called out in the day summary and do not count toward votes.
+
+**Q: Someone blocked the bot / never got their role.**
+A: If they blocked it (or never sent `/start`) **before Night 1**, they are removed and roles are dealt again. If a send just fails, or they block **after** the game has started, they stay on the roster as 📵 silent: they keep their seat, cannot act, and do not stall the vote.
 
 **Q: What if the bot restarts mid-game?**
 A: Game state is saved after every action and active games resume automatically. Live panels like the vote board may be re-posted rather than edited, which costs nothing. If the restart lands while roles are being dealt, everyone is sent their role again — the same role, so a second copy is nothing to worry about.

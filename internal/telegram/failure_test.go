@@ -40,6 +40,8 @@ func TestTransientFailureDoesNotEjectThePlayer(t *testing.T) {
 		"internal server error",
 		"sender queue is full",
 		"sender is shutting down",
+		"Bad Request: can't parse message text",
+		"Post \"https://api.telegram.org\": EOF",
 	} {
 		ev := roleDMFailureEvent(7, 3, errors.New(msg))
 		got, ok := ev.(engine.PlayerDisconnectedEvent)

@@ -26,6 +26,19 @@ export MONGODB_DB="mafia_bot"  # optional, defaults to "mafia_bot"
 go run cmd/bot/main.go
 ```
 
+With only those variables the bot **long-polls** (fine for local `go run`).
+In production set a public HTTPS origin so Telegram pushes updates:
+
+```bash
+export WEBHOOK_URL="https://your-service.onrender.com"
+export WEBHOOK_SECRET="a-long-random-string"
+export PORT=8080
+```
+
+Telegram POSTs to `{WEBHOOK_URL}/telegram/webhook` with
+`X-Telegram-Bot-Api-Secret-Token`. On Render a **Web Service** provides
+`PORT` and `RENDER_EXTERNAL_URL`, so `WEBHOOK_URL` can be omitted there.
+
 Values are also read from a `.env` file in the working directory, so local runs
 need no exports.
 
@@ -44,13 +57,13 @@ same interface and is used by the test suite, but it is not wired into `main`,
 since a bot that silently forgets every record on restart is worse than one that
 refuses to boot.
 
-## Deploy on Render (Free Tier)
+## Deploy on Render
 
-Use a **Background Worker** (not Web Service) for 24/7 Telegram polling.
+Use a **Web Service** so Telegram can POST webhook updates to a public HTTPS URL.
 
 1. Push this repo to GitHub
 2. Render → **New** → **Blueprint** → connect repo
-3. Set `TELEGRAM_BOT_TOKEN` and `MONGODB_URI` in the dashboard
+3. Set `TELEGRAM_BOT_TOKEN`, `MONGODB_URI`, and `WEBHOOK_SECRET` in the dashboard
 4. Deploy
 
 Full guide: [docs/DEPLOY_RENDER.md](docs/DEPLOY_RENDER.md)
@@ -112,5 +125,6 @@ go vet ./... && gofmt -l .
 **Reliability**
 - Actor-model concurrency, no shared mutable state
 - Crash recovery from persistent state snapshots
+- Role DMs are confirmed by Telegram before Night 1; a blocked player is redealt, a flaky send only marks them silent
 - Global and per-chat rate limiting, with retry and backoff
 - Markdown escaping on every piece of user-supplied text

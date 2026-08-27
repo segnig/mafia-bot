@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 // F11: without a limiter a busy game trips Telegram's per-chat cap and its
@@ -84,10 +86,15 @@ func TestErrorClassification(t *testing.T) {
 		{"Forbidden: bot was blocked by the user", true, false, false},
 		{"Forbidden: user is deactivated", true, false, false},
 		{"Bad Request: chat not found", true, false, false},
+		{"Forbidden: bot can't initiate conversation with a user", true, false, false},
 		{"Too Many Requests: retry after 12", false, true, false},
+		{"please retry after a moment", false, true, false},
 		{"Bad Request: can't parse entities: Can't find end of the entity", false, false, true},
+		{"Bad Request: can't parse message text", false, false, true},
 		{"Bad Request: message is too long", false, false, false},
 		{"Bad Request: message is not modified", false, false, false},
+		{"internal server error", false, false, false},
+		{"Post \"https://api.telegram.org\": EOF", false, false, false},
 	}
 	for _, tc := range cases {
 		err := errors.New(tc.err)
@@ -100,5 +107,42 @@ func TestErrorClassification(t *testing.T) {
 		if got := isParseError(err); got != tc.parseErr {
 			t.Errorf("isParseError(%q) = %v, want %v", tc.err, got, tc.parseErr)
 		}
+	}
+}
+
+func TestUnchangedEditAndRetryAfter(t *testing.T) {
+	if !isUnchangedEdit(errors.New("Bad Request: message is not modified")) {
+		t.Error("an unchanged edit must be treated as a no-op, not a failure")
+	}
+	if isUnchangedEdit(errors.New("Too Many Requests: retry after 12")) {
+		t.Error("a rate limit is not an unchanged edit")
+	}
+
+	tgErr := &tgbotapi.Error{
+		Message:            "Too Many Requests",
+		ResponseParameters: tgbotapi.ResponseParameters{RetryAfter: 12},
+	}
+	if got := retryAfter(tgErr); got != 12*time.Second {
+		t.Errorf("retryAfter = %v, want 12s", got)
+	}
+	if got := retryAfter(errors.New("no header")); got != 0 {
+		t.Errorf("a plain error has no retry-after, got %v", got)
+	}
+}
+
+func TestFullQueueReportsAFailureRatherThanBlocking(t *testing.T) {
+	s := NewSender(nil, 0)
+	defer s.Stop()
+
+	var failed int
+	for i := 0; i < 600; i++ {
+		s.SendDMWithResult(int64(i), "x", func(err error) {
+			if err != nil {
+				failed++
+			}
+		})
+	}
+	if failed == 0 {
+		t.Fatal("a 512-deep queue should refuse additional work instead of blocking")
 	}
 }

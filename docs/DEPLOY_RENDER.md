@@ -1,15 +1,15 @@
-# Deploy on Render (Free Tier)
+# Deploy on Render (Webhook)
 
-This bot is configured for [Render](https://render.com) free tier using a **Background Worker**.
+This bot is configured for [Render](https://render.com) as a **Web Service**. Telegram pushes updates to `POST /telegram/webhook` over HTTPS.
 
-## Why Background Worker?
+## Why a Web Service?
 
-Telegram bots use **long polling** (always listening for updates). On Render free:
-
-| Service type | Free tier behavior | Good for this bot? |
+| Service type | What Telegram needs | Good for this bot? |
 |---|---|---|
-| **Background Worker** | Runs continuously (within 750 hrs/month) | ✅ **Recommended** |
-| Web Service | Sleeps after ~15 min without HTTP traffic | ❌ Bot stops receiving updates |
+| **Web Service** | A public HTTPS URL for `setWebhook` | ✅ **Required for webhook mode** |
+| Background Worker | No inbound HTTP | ❌ Telegram cannot reach it |
+
+On the **free** web plan the instance sleeps after ~15 minutes idle. The next Telegram update wakes it (cold start). Games resume from MongoDB; phase timers only run while the process is up. For reliable night/day clocks, use a paid instance that does not sleep.
 
 ## Prerequisites
 
@@ -17,7 +17,7 @@ Telegram bots use **long polling** (always listening for updates). On Render fre
 2. **MongoDB Atlas** free cluster ([cloud.mongodb.com](https://cloud.mongodb.com))
 3. **GitHub repo** with this project pushed
 
-## MongoDB Atlas (required for Render)
+## MongoDB Atlas (required)
 
 Render uses dynamic outbound IPs. In Atlas:
 
@@ -33,11 +33,15 @@ Render uses dynamic outbound IPs. In Atlas:
 4. Set secret env vars when prompted:
    - `TELEGRAM_BOT_TOKEN`
    - `MONGODB_URI`
+   - `WEBHOOK_SECRET` (any long random string; Telegram's `secret_token`)
 5. Click **Apply** → wait for deploy
+
+Render sets `PORT` and `RENDER_EXTERNAL_URL`. The bot registers
+`{RENDER_EXTERNAL_URL}/telegram/webhook` with Telegram on boot.
 
 ## Deploy manually
 
-1. Render Dashboard → **New** → **Background Worker**
+1. Render Dashboard → **New** → **Web Service**
 2. Connect GitHub repo
 3. Settings:
 
@@ -46,7 +50,8 @@ Render uses dynamic outbound IPs. In Atlas:
 | **Runtime** | Go |
 | **Build Command** | `go build -ldflags="-s -w" -o bot ./cmd/bot` |
 | **Start Command** | `./bot` |
-| **Plan** | Free |
+| **Health Check Path** | `/health` |
+| **Plan** | Free, or paid if you need timers that never pause |
 
 4. Environment variables:
 
@@ -55,13 +60,15 @@ Render uses dynamic outbound IPs. In Atlas:
 | `TELEGRAM_BOT_TOKEN` | Your BotFather token |
 | `MONGODB_URI` | MongoDB Atlas connection string |
 | `MONGODB_DB` | `mafia_bot` (optional) |
+| `WEBHOOK_SECRET` | Long random string (recommended) |
+| `WEBHOOK_URL` | Optional override; defaults to `RENDER_EXTERNAL_URL` |
 | `RENDER` | `true` (optional, enables production logging) |
 
-5. **Create Background Worker**
+5. **Create Web Service**
 
 ## Deploy with Docker (alternative)
 
-1. New → Background Worker
+1. New → Web Service
 2. **Language** → Docker
 3. Dockerfile path: `./Dockerfile`
 4. Same environment variables as above
@@ -73,30 +80,32 @@ Check Render logs for:
 ```
 Connected to MongoDB Atlas (db: mafia_bot)
 Bot started as @YourBotName
-Starting Mafia Bot (worker mode)...
+Telegram webhook registered at https://….onrender.com/telegram/webhook
+webhook listening on :10000 for https://….onrender.com/telegram/webhook
 ```
+
+Open `https://your-service.onrender.com/health` — it should return `ok`.
 
 Test in Telegram:
 1. DM the bot → `/start`
 2. In a group → `/startgame`
 
-## Free tier limits
+## Local development
 
-- **750 instance hours/month** — one worker 24/7 uses ~720 hrs (fits)
-- **512 MB RAM** — sufficient for this bot
-- **No persistent disk** — all state is in MongoDB Atlas (already implemented)
-- **Cold starts** on redeploy — active games auto-resume from MongoDB
+Without `WEBHOOK_URL`, `go run cmd/bot/main.go` **deletes any webhook** and long-polls, so you do not need HTTPS on your laptop. Do not run polling against a bot that is also serving production webhooks — Telegram allows only one delivery mode per bot.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---|---|
 | `Failed to connect to MongoDB` | Check Atlas IP whitelist (`0.0.0.0/0`), user/password in URI |
-| Bot not responding | Confirm service type is **Worker**, not Web Service |
+| Bot not responding | Confirm the service is a **Web Service** (not a Worker) and `/health` is 200 |
+| `setWebhook` error | `WEBHOOK_URL` / `RENDER_EXTERNAL_URL` must be `https://…` with no trailing path |
+| 401s in logs | `WEBHOOK_SECRET` changed after Telegram registered the old secret — restart so `setWebhook` runs again |
 | `TELEGRAM_BOT_TOKEN required` | Add env var in Render dashboard → Environment |
-| Deploy fails on build | Check Render logs; ensure `go.mod` is committed |
 | Games lost on restart | Verify `MONGODB_URI` is set — without it bot won't persist |
+| Night timer felt frozen | Free web instance was asleep; upgrade the plan or ping `/health` |
 
 ## Updating
 
-Push to your connected branch — Render auto-redeploys. Games in progress resume automatically after restart.
+Push to your connected branch — Render auto-redeploys. The new process calls `setWebhook` again and resumes active games from MongoDB.

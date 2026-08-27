@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"strconv"
-	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/segni/mafia-bot/internal/engine"
@@ -47,7 +46,7 @@ func (b *Bot) cmdLeaderboard(msg *tgbotapi.Message) {
 		title = "Top players overall"
 	}
 	// "global" asks for the worldwide board from inside a group.
-	if strings.EqualFold(strings.TrimSpace(msg.CommandArguments()), "global") {
+	if isGlobalLeaderboard(msg.CommandArguments()) {
 		chatID = 0
 		title = "Top players overall"
 	}
