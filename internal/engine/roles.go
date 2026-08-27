@@ -78,21 +78,24 @@ func SampleOptionalRoles(eligible []RoleDefinition, budget int, rng io.Reader) [
 
 func ValidateBalance(roles []Role, n int) error {
 	mafiaCount := 0
-	villagerCount := 0
+	killerCount := 0
 	for _, r := range roles {
-		if RoleTeam(r) == TeamMafia {
+		switch RoleTeam(r) {
+		case TeamMafia:
 			mafiaCount++
-		}
-		if r == RoleVillager {
-			villagerCount++
+		case TeamKiller:
+			killerCount++
 		}
 	}
 	halfCeil := (n + 1) / 2
 	if mafiaCount >= halfCeil {
 		return fmt.Errorf("mafia count %d >= ceil(n/2)=%d", mafiaCount, halfCeil)
 	}
-	if villagerCount < 0 {
-		return fmt.Errorf("negative villager count")
+	// The lone-wolf killer is a third side, so it counts toward how much of
+	// the board is hostile even though it is not mafia.
+	if mafiaCount+killerCount >= halfCeil {
+		return fmt.Errorf("hostile roles %d (mafia %d + killers %d) >= ceil(n/2)=%d",
+			mafiaCount+killerCount, mafiaCount, killerCount, halfCeil)
 	}
 	return nil
 }
@@ -107,10 +110,12 @@ func GenerateRoleSet(n int, cfg GameConfig, rng io.Reader) ([]Role, error) {
 	chosen := SampleOptionalRoles(eligible, budget, rng)
 
 	var roles []Role
-	godfatherChosen := false
+	// Mafia-side specials take over an existing mafia slot rather than adding
+	// a member, so the mafia headcount stays exactly what the ratio dictates.
+	var mafiaSpecials []Role
 	for _, r := range chosen {
 		if r.ReplacesMafiaSlot {
-			godfatherChosen = true
+			mafiaSpecials = append(mafiaSpecials, r.Role)
 			continue
 		}
 		roles = append(roles, r.Role)
@@ -118,10 +123,11 @@ func GenerateRoleSet(n int, cfg GameConfig, rng io.Reader) ([]Role, error) {
 
 	mafiaRoles := make([]Role, mafiaCount)
 	for i := range mafiaRoles {
+		if i < len(mafiaSpecials) {
+			mafiaRoles[i] = mafiaSpecials[i]
+			continue
+		}
 		mafiaRoles[i] = RoleMafia
-	}
-	if godfatherChosen && mafiaCount >= 1 {
-		mafiaRoles[0] = RoleGodfather
 	}
 	roles = append(roles, mafiaRoles...)
 

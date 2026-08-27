@@ -289,3 +289,109 @@ func TestEveryLivePhaseKeepsATimer(t *testing.T) {
 	h.waitForTimer(t, engine.PhaseNight)
 	h.waitForPhase(t, engine.PhaseNight)
 }
+
+// A timeout that has already been delivered is not scheduling anything. Unless
+// the watchdog notices that, an event that consumes a fired timer without
+// arming a new one strands the game in the phase it was already in — the case
+// the fallback exists for.
+func TestAFiredTimeoutNoLongerCountsAsScheduled(t *testing.T) {
+	h := start(t, newTestGame(t, 5), nil)
+
+	h.actor.resetTimer(5*time.Millisecond, engine.PhaseDiscussion)
+	if !h.actor.hasPendingTimer(engine.PhaseDiscussion) {
+		t.Fatal("a timer that was just armed should be pending")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !h.actor.hasPendingTimer(engine.PhaseDiscussion) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Error("a timeout that already fired is still reported as scheduled")
+}
+
+// Events can reach the actor before the event that creates the game does, since
+// the transport starts the actor and then sends to it. There is no clock to be
+// missing yet, so that must not be reported as a failure or answered with a
+// fallback that discards the real timer's warnings.
+func TestNoFallbackBeforeTheGameHasArmedItsFirstTimer(t *testing.T) {
+	h := start(t, newTestGame(t, 5), nil)
+
+	h.actor.Send(engine.JoinEvent{PlayerID: 99, Username: "early", Time: time.Now()})
+
+	// Give the event time to be reduced; the join is visible once it has been.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := h.actor.PlayerSnapshot(99); ok {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, ok := h.actor.PlayerSnapshot(99); !ok {
+		t.Fatal("the early join was never processed")
+	}
+
+	if got := h.actor.TimerPhase(); got != "" {
+		t.Errorf("a fallback timer was armed for %q before the game started its clock", got)
+	}
+
+	// The real timer still arrives and takes over.
+	h.actor.Send(engine.GameCreatedEvent{})
+	h.waitForTimer(t, engine.PhaseLobby)
+}
+
+// Game IDs come from the chat, so a replacement game can be registered while
+// the previous one is still shutting down. Cleaning up unconditionally would
+// unregister the live game instead of the finished one.
+func TestSupervisorCleanupLeavesAReplacementGameAlone(t *testing.T) {
+	outbox := make(chan OutgoingMessage, 256)
+	go func() {
+		for range outbox {
+		}
+	}()
+	sup := NewSupervisor(outbox)
+	defer sup.Shutdown(2 * time.Second)
+
+	finishing := make(chan struct{})
+	release := make(chan struct{})
+
+	gs := newTestGame(t, 5)
+	gs.Phase = engine.PhaseDiscussion
+	for _, p := range gs.Players {
+		p.Role = engine.RoleVillager
+	}
+	gs.Players[1].Role = engine.RoleMafia
+
+	first := sup.StartGame(gs)
+	first.OnFinish = func(engine.GameID) {
+		close(finishing)
+		<-release // hold the old game inside its shutdown
+	}
+
+	first.Send(engine.EndGameEvent{PlayerID: 1})
+	select {
+	case <-finishing:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the game never reached cleanup")
+	}
+
+	// The replacement claims the same ID while the old actor is still winding
+	// down, exactly as a rematch in the same chat would.
+	second := sup.StartGame(newTestGame(t, 5))
+	close(release)
+
+	// Long enough for the released actor to run its cleanup, which is all that
+	// stands between the replacement and being unregistered.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if sup.GetGame("test") == nil {
+			t.Fatal("the finished game's cleanup unregistered its replacement")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if sup.GetGame("test") != second {
+		t.Error("the supervisor should still be holding the replacement game")
+	}
+}

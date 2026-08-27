@@ -31,6 +31,8 @@ type GameActor struct {
 	timerMu       sync.Mutex
 	timer         *time.Timer
 	timerPhase    engine.Phase
+	timerFired    bool // the armed timeout has already been delivered
+	timerEver     bool // a timeout has been armed at least once
 	warningTimers []*time.Timer
 
 	// persistQueue holds at most one pending snapshot. Persistence talks to
@@ -157,10 +159,15 @@ func (a *GameActor) handle(ev engine.Event) {
 	}
 
 	// Safety net: a phase with nothing scheduled cannot advance on its own.
-	// This deliberately does not require the phase to have changed — an event
-	// that consumes a fired timer without arming a new one strands the game in
-	// the phase it was already in, which is the harder case to spot.
-	if !timerArmed && a.TimerPhase() != phase {
+	// A timeout that has already fired counts as nothing scheduled even though
+	// timerPhase still names the phase it belonged to, which is how an event
+	// that consumes a timer without arming a new one gets caught.
+	//
+	// The check waits until the game has armed its first timer. Until then
+	// there is no invariant to violate: the creating event is what starts the
+	// clock, and an event that reaches the actor ahead of it would otherwise
+	// log a failure that does not exist.
+	if !timerArmed && !a.hasPendingTimer(phase) {
 		log.Printf("game %s: phase %s left no timer armed, using fallback", a.id, phase)
 		a.resetTimer(fallbackPhaseTimeout, phase)
 	}
@@ -209,12 +216,29 @@ func (a *GameActor) TimerPhase() engine.Phase {
 	return a.timerPhase
 }
 
+// hasPendingTimer reports whether a timeout for this phase is still waiting to
+// fire. A game that has never armed one is reported as pending, because its
+// clock has not started yet and the absence is expected.
+func (a *GameActor) hasPendingTimer(phase engine.Phase) bool {
+	a.timerMu.Lock()
+	defer a.timerMu.Unlock()
+	if !a.timerEver {
+		return true
+	}
+	return a.timer != nil && !a.timerFired && a.timerPhase == phase
+}
+
 func (a *GameActor) resetTimer(d time.Duration, phase engine.Phase) {
 	a.stopTimers()
 	a.timerMu.Lock()
 	defer a.timerMu.Unlock()
 	a.timerPhase = phase
+	a.timerFired = false
+	a.timerEver = true
 	a.timer = time.AfterFunc(d, func() {
+		a.timerMu.Lock()
+		a.timerFired = true
+		a.timerMu.Unlock()
 		a.Send(engine.TimeoutEvent{Phase: phase})
 	})
 }
@@ -231,6 +255,7 @@ func (a *GameActor) stopTimers() {
 	}
 	a.warningTimers = nil
 	a.timerPhase = ""
+	a.timerFired = false
 }
 
 func (a *GameActor) addWarningTimer(d time.Duration, phase engine.Phase, secondsLeft int) {
@@ -274,8 +299,14 @@ func (s *Supervisor) StartGame(state *engine.GameState) *GameActor {
 		defer s.wg.Done()
 		ga.Run(ctx)
 		s.mu.Lock()
-		delete(s.games, state.ID)
-		delete(s.cancel, state.ID)
+		// Only remove this actor. Game IDs are derived from the chat, so a
+		// replacement game can already be registered under the same key by the
+		// time this one finishes shutting down, and an unconditional delete
+		// would unregister the live game instead.
+		if s.games[state.ID] == ga {
+			delete(s.games, state.ID)
+			delete(s.cancel, state.ID)
+		}
 		s.mu.Unlock()
 		log.Printf("Game %s ended", state.ID)
 	}()

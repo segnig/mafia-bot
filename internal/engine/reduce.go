@@ -3,6 +3,7 @@ package engine
 import (
 	"crypto/rand"
 	"fmt"
+	"io"
 	"sort"
 	"time"
 )
@@ -23,7 +24,7 @@ func Reduce(gs *GameState, ev Event) (*GameState, []SideEffect) {
 	case EndGameEvent:
 		return reduceEndGame(gs, e)
 	case RolesDeliveredEvent:
-		return reduceRolesDelivered(gs)
+		return reduceRolesDelivered(gs, e)
 	case RoleDeliveryFailedEvent:
 		return reduceRoleDeliveryFailed(gs, e)
 	case NightActionEvent:
@@ -46,6 +47,14 @@ func Reduce(gs *GameState, ev Event) (*GameState, []SideEffect) {
 		return reduceWhisper(gs, e)
 	case PlayerSpokeEvent:
 		return reducePlayerSpoke(gs, e)
+	case RevealEvent:
+		return reduceReveal(gs, e)
+	case ReactEvent:
+		return reduceReact(gs, e)
+	case MafiaChatEvent:
+		return reduceMafiaChat(gs, e)
+	case GhostChatEvent:
+		return reduceGhostChat(gs, e)
 	case HostTransferEvent:
 		return reduceHostTransfer(gs, e)
 	case KickEvent:
@@ -123,7 +132,15 @@ func reduceResume(gs *GameState) (*GameState, []SideEffect) {
 	case PhaseLobby:
 		effects = append(effects, lobbyStatusEffect(gs))
 	case PhaseRoleAssign:
-		effects = append(effects, RolesDeliveredEffect{GameID: gs.ID})
+		// The restart lost track of which role DMs had gone out, so re-send
+		// them all under a new deal. Sealing an empty batch instead would
+		// report a clean delivery for messages that may never have been sent,
+		// and start Night 1 for players who never learned their role.
+		gs.DealNumber++
+		effects = append(effects, SendGroupEffect{gs.ChatID,
+			"♻️ Resuming role assignment — check your DMs, your role is on its way again."})
+		effects = append(effects, roleDMEffects(gs)...)
+		effects = append(effects, RolesDeliveredEffect{GameID: gs.ID, Deal: gs.DealNumber})
 	case PhaseNight:
 		effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf(
 			"🌙 Resuming *Night %d*. Players with a night action: check your DMs.", gs.DayNumber)})
@@ -245,6 +262,7 @@ func lobbyStatusEffect(gs *GameState) SideEffect {
 		Players:    players,
 		MinPlayers: gs.Config.MinPlayers,
 		MaxPlayers: gs.Config.MaxPlayers,
+		Preset:     gs.Config.PresetName,
 	}
 }
 
@@ -317,10 +335,9 @@ func reduceBegin(gs *GameState, e BeginEvent) (*GameState, []SideEffect) {
 
 	gs.Phase = PhaseRoleAssign
 	gs.RosterLocked = true
+	gs.StartedAt = time.Now()
+	gs.DealNumber++
 	gs.AppendLog("phase_change", map[string]interface{}{"phase": string(PhaseRoleAssign)})
-
-	var effects []SideEffect
-	effects = append(effects, SendGroupEffect{gs.ChatID, "🎬 The game is starting! Check your DMs for your role...\n\n⚠️ *Fair Play Reminder:* Do not screenshot or share your DM role with others. Play fair and keep the mystery alive!"})
 
 	optionalRolesChosen := []string{}
 	mafiaCount := 0
@@ -334,31 +351,41 @@ func reduceBegin(gs *GameState, e BeginEvent) (*GameState, []SideEffect) {
 		}
 	}
 
-	// Deterministic DM order keeps the effect stream reproducible in tests.
-	for _, p := range playersByID(gs) {
-		effects = append(effects, SendRoleDMEffect{
-			GameID:   gs.ID,
-			PlayerID: p.ID,
-			Text:     formatRoleDM(p.Role),
-		})
-	}
+	var effects []SideEffect
+	effects = append(effects, SendGroupEffect{gs.ChatID, formatRosterAnnouncement(gs)})
 
-	// Notify mafia members of each other (if more than one)
+	pairs := pairLovers(gs, rand.Reader)
+
+	// Deterministic DM order keeps the effect stream reproducible in tests.
+	effects = append(effects, roleDMEffects(gs)...)
+
+	// Mafia members learn who their team is, and how to talk to them.
 	if mafiaCount > 1 {
 		var mafiaNames []string
 		var mafiaIDs []PlayerID
 		for _, p := range playersByID(gs) {
 			if RoleTeam(p.Role) == TeamMafia {
-				mafiaNames = append(mafiaNames, p.Label())
+				mafiaNames = append(mafiaNames, fmt.Sprintf("%s (%s)", p.Label(), RoleBadge(p.Role)))
 				mafiaIDs = append(mafiaIDs, p.ID)
 			}
 		}
-		for _, pid := range mafiaIDs {
-			effects = append(effects, SendDMEffect{
-				PlayerID: pid,
-				Text:     fmt.Sprintf("Your mafia teammates: %s\nCoordinate your kill target each night.", joinStrings(mafiaNames)),
-			})
+		team := fmt.Sprintf("🔪 *Your mafia family:*\n%s\n\nYou must agree on one victim each night — a split vote kills nobody.",
+			bulletList(mafiaNames))
+		if gs.Config.MafiaNightChat {
+			team += "\n\nTalk privately with `/mafia <message>` in this chat."
 		}
+		for _, pid := range mafiaIDs {
+			effects = append(effects, SendDMEffect{PlayerID: pid, Text: team})
+		}
+	}
+
+	// Lovers learn about each other but nothing else.
+	for _, pair := range pairs {
+		a, b := gs.Players[pair[0]], gs.Players[pair[1]]
+		effects = append(effects,
+			SendDMEffect{a.ID, fmt.Sprintf("💞 *You are in love with %s.*\nIf either of you dies, the other dies of grief. Neither of you knows the other's role.", b.Label())},
+			SendDMEffect{b.ID, fmt.Sprintf("💞 *You are in love with %s.*\nIf either of you dies, the other dies of grief. Neither of you knows the other's role.", a.Label())},
+		)
 	}
 
 	gs.AppendLog("roles_generated", map[string]interface{}{
@@ -366,34 +393,96 @@ func reduceBegin(gs *GameState, e BeginEvent) (*GameState, []SideEffect) {
 		"optional_roles": optionalRolesChosen,
 		"n_players":      len(gs.Players),
 	})
+	gs.AddTimeline("🎬", fmt.Sprintf("The game began with %d players.", len(gs.Players)))
 
 	// The transport turns this into a RolesDeliveredEvent once the DMs above
-	// have been queued; that is what starts Night 1. The timer is a backstop
-	// in case the acknowledgement never comes back.
-	effects = append(effects, RolesDeliveredEffect{GameID: gs.ID})
+	// have resolved; that is what starts Night 1. The timer is a backstop in
+	// case the acknowledgement never comes back.
+	effects = append(effects, RolesDeliveredEffect{GameID: gs.ID, Deal: gs.DealNumber})
 	effects = append(effects, armPhase(gs, PhaseRoleAssign)...)
 
 	return gs, effects
 }
 
-func formatRoleDM(role Role) string {
-	switch role {
-	case RoleVillager:
-		return "🏘️ Your role: *Villager*\nYou are an ordinary townsperson. Use your vote wisely to find the mafia!"
-	case RoleMafia:
-		return "🔪 Your role: *Mafia*\nEliminate the town, one by one. Each night, vote with your team to kill a player."
-	case RoleDetective:
-		return "🔍 Your role: *Detective*\nEach night, investigate one player to learn their alignment (Town or Mafia)."
-	case RoleDoctor:
-		return "💊 Your role: *Doctor*\nEach night, choose one player to protect from elimination."
-	case RoleGodfather:
-		return "🎩 Your role: *Godfather*\nYou lead the mafia. You appear *innocent* to Detective investigations!"
-	case RoleVigilante:
-		return "🔫 Your role: *Vigilante*\nYou fight for the town. Once per game, you may kill a player at night. Choose wisely!"
-	case RoleJester:
-		return "🃏 Your role: *Jester*\nYou win if the town votes to lynch you during the day. Act suspicious!"
+// roleDMEffects emits one role DM per player, tagged with the current deal.
+// Every path that deals or re-sends roles goes through here, so the deal tag
+// can never be forgotten on one of them.
+func roleDMEffects(gs *GameState) []SideEffect {
+	var effects []SideEffect
+	for _, p := range playersByID(gs) {
+		effects = append(effects, SendRoleDMEffect{
+			GameID:   gs.ID,
+			PlayerID: p.ID,
+			Text:     formatRoleDM(gs, p),
+			Deal:     gs.DealNumber,
+		})
 	}
-	return fmt.Sprintf("Your role: *%s*", EscapeMD(string(role)))
+	return effects
+}
+
+// formatRoleDM is the message a player receives when roles are dealt. It reads
+// entirely from the role catalogue, so a new role needs no change here.
+func formatRoleDM(gs *GameState, p *Player) string {
+	info := RoleInfoFor(p.Role)
+
+	msg := fmt.Sprintf("%s *You are the %s*\n_%s team_\n\n%s",
+		info.Emoji, EscapeMD(info.Title), TeamLabel(info.Team), info.Blurb)
+
+	switch {
+	case p.Role == RoleMayor:
+		msg += fmt.Sprintf("\n\n🗳️ Once revealed, your vote counts as *%d*.", gs.Config.MayorVoteWeight)
+	case info.HasNightAction():
+		msg += "\n\n🌙 You will get a private keyboard each night. Tap a name to act."
+	default:
+		msg += "\n\n☀️ You have no night action — your influence is in the daytime."
+	}
+
+	msg += "\n\n⚠️ _Do not share or screenshot this message. Keep the mystery alive._"
+	return msg
+}
+
+// formatRosterAnnouncement tells the group what kind of game they are about to
+// play without leaking who holds which role.
+func formatRosterAnnouncement(gs *GameState) string {
+	counts := map[Team]int{}
+	for _, p := range gs.Players {
+		counts[RoleTeam(p.Role)]++
+	}
+
+	msg := "🎬 *The game begins!*\n━━━━━━━━━━━━━━━━━━━━\n"
+	msg += fmt.Sprintf("👥 Players: *%d*\n", len(gs.Players))
+	msg += fmt.Sprintf("🔪 Mafia: *%d*\n", counts[TeamMafia])
+	if counts[TeamKiller] > 0 {
+		msg += fmt.Sprintf("🩸 Serial killers: *%d*\n", counts[TeamKiller])
+	}
+	if counts[TeamNeutral] > 0 {
+		msg += fmt.Sprintf("🎭 Neutrals: *%d*\n", counts[TeamNeutral])
+	}
+	if gs.Config.EnableLovers {
+		msg += "💞 Two players are secretly in love\n"
+	}
+	msg += "━━━━━━━━━━━━━━━━━━━━\n📬 *Check your DMs for your role.*"
+	return msg
+}
+
+// pairLovers links two players at the deal. Returns the pairs it created so
+// the caller can DM them.
+func pairLovers(gs *GameState, rng io.Reader) [][2]PlayerID {
+	if !gs.Config.EnableLovers || len(gs.Players) < 4 {
+		return nil
+	}
+	ids := make([]PlayerID, 0, len(gs.Players))
+	for id := range gs.Players {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	shuffled := FisherYatesShuffle(ids, rng)
+	a, b := shuffled[0], shuffled[1]
+	gs.Players[a].LoverID = b
+	gs.Players[b].LoverID = a
+	gs.AppendLog("lovers_paired", map[string]interface{}{"a": a, "b": b})
+	return [][2]PlayerID{{a, b}}
 }
 
 func joinStrings(ss []string) string {
@@ -407,13 +496,35 @@ func joinStrings(ss []string) string {
 	return result
 }
 
+func bulletList(ss []string) string {
+	result := ""
+	for _, s := range ss {
+		result += "  • " + s + "\n"
+	}
+	return result
+}
+
 func reduceRoleDeliveryFailed(gs *GameState, e RoleDeliveryFailedEvent) (*GameState, []SideEffect) {
-	if gs.Phase != PhaseRoleAssign {
+	// A failure from a superseded deal has already been answered: the redeal
+	// that superseded it sent this player a fresh role, and its own outcome is
+	// what decides their fate. Acting on the stale one would remove a player
+	// who is perfectly reachable. Deal 0 means untagged, which only happens in
+	// tests that drive the reducer directly.
+	if e.Deal != 0 && e.Deal != gs.DealNumber {
 		return gs, nil
 	}
 	p, exists := gs.Players[e.PlayerID]
 	if !exists {
 		return gs, nil
+	}
+
+	// The failure belongs to the current deal but arrived after the phase moved
+	// on — the backstop timer fired, or another failure in the same batch sent
+	// the game back to the lobby. Redealing is no longer possible, so fall
+	// through to the ordinary unreachable-player path instead of dropping the
+	// failure on the floor and leaving them holding a role they never saw.
+	if gs.Phase != PhaseRoleAssign {
+		return reduceDisconnect(gs, PlayerDisconnectedEvent{PlayerID: e.PlayerID})
 	}
 
 	// Remove the player and redistribute roles (§8.3). Leaving them in with an
@@ -432,6 +543,7 @@ func reduceRoleDeliveryFailed(gs *GameState, e RoleDeliveryFailedEvent) (*GameSt
 		gs.RosterLocked = false
 		for _, rp := range gs.Players {
 			rp.Role = RoleUnassigned
+			rp.LoverID = 0
 		}
 		effects := []SideEffect{
 			SendGroupEffect{gs.ChatID, fmt.Sprintf("%s could not receive their role and has been removed. Not enough players remain — back to lobby.", label)},
@@ -452,6 +564,7 @@ func reduceRoleDeliveryFailed(gs *GameState, e RoleDeliveryFailedEvent) (*GameSt
 		gs.RosterLocked = false
 		for _, rp := range gs.Players {
 			rp.Role = RoleUnassigned
+			rp.LoverID = 0
 		}
 		effects := []SideEffect{
 			SendGroupEffect{gs.ChatID, "Failed to reassign roles. Returning to lobby."},
@@ -463,425 +576,36 @@ func reduceRoleDeliveryFailed(gs *GameState, e RoleDeliveryFailedEvent) (*GameSt
 	var effects []SideEffect
 	effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf("%s could not receive their role and has been removed. Roles have been reassigned to remaining players.", label)})
 
+	// The old pairing may have included the player who just left.
+	for _, rp := range gs.Players {
+		rp.LoverID = 0
+	}
 	for pid, role := range assignment {
 		gs.Players[pid].Role = role
 	}
-	for _, p := range playersByID(gs) {
-		effects = append(effects, SendRoleDMEffect{
-			GameID:   gs.ID,
-			PlayerID: p.ID,
-			Text:     formatRoleDM(p.Role),
-		})
-	}
+	pairLovers(gs, rand.Reader)
 
-	effects = append(effects, RolesDeliveredEffect{GameID: gs.ID})
+	// A new deal, so outcomes still arriving from the previous one no longer
+	// apply to anything.
+	gs.DealNumber++
+	effects = append(effects, roleDMEffects(gs)...)
+
+	effects = append(effects, RolesDeliveredEffect{GameID: gs.ID, Deal: gs.DealNumber})
 	effects = append(effects, armPhase(gs, PhaseRoleAssign)...)
 	return gs, effects
 }
 
-func reduceRolesDelivered(gs *GameState) (*GameState, []SideEffect) {
+func reduceRolesDelivered(gs *GameState, e RolesDeliveredEvent) (*GameState, []SideEffect) {
 	if gs.Phase != PhaseRoleAssign {
 		return gs, nil
 	}
+	// Only the deal that is currently outstanding may start the night. A redeal
+	// leaves the previous batch's DMs resolving in the background, and their
+	// completion says nothing about whether the roles now in play arrived.
+	if e.Deal != 0 && e.Deal != gs.DealNumber {
+		return gs, nil
+	}
 	return transitionToNight(gs)
-}
-
-// nightPrompts builds the per-role action DMs. When onlyPending is set it skips
-// players who have already submitted, so a resume does not re-prompt them.
-func nightPrompts(gs *GameState, onlyPending bool) []SideEffect {
-	aliveTargets := gs.AlivePlayerIDs()
-	sort.Slice(aliveTargets, func(i, j int) bool { return aliveTargets[i] < aliveTargets[j] })
-
-	firstNight := gs.DayNumber == 1
-	var effects []SideEffect
-
-	for _, p := range playersByID(gs) {
-		if !p.CanAct() {
-			continue
-		}
-		if onlyPending {
-			if _, submitted := gs.NightActions[p.ID]; submitted {
-				continue
-			}
-		}
-		switch p.Role {
-		case RoleMafia, RoleGodfather:
-			if firstNight && !gs.Config.FirstNightKill {
-				if !onlyPending {
-					effects = append(effects, SendDMEffect{p.ID, "🌙 Night 1 — no kill tonight. Use this time to strategize with your team."})
-				}
-			} else {
-				targets := filterTargets(aliveTargets, p.ID, TeamMafia, gs)
-				effects = append(effects, SendNightActionEffect{p.ID, p.Role, targets, gs.ID})
-			}
-		case RoleDetective:
-			effects = append(effects, SendNightActionEffect{p.ID, RoleDetective, filterOutSelf(aliveTargets, p.ID), gs.ID})
-		case RoleDoctor:
-			targets := aliveTargets
-			if !gs.Config.DoctorSelfProtect {
-				targets = filterOutSelf(aliveTargets, p.ID)
-			}
-			effects = append(effects, SendNightActionEffect{p.ID, RoleDoctor, targets, gs.ID})
-		case RoleVigilante:
-			if !p.UsedAbility {
-				effects = append(effects, SendNightActionEffect{p.ID, RoleVigilante, filterOutSelf(aliveTargets, p.ID), gs.ID})
-			}
-		}
-	}
-	return effects
-}
-
-func transitionToNight(gs *GameState) (*GameState, []SideEffect) {
-	gs.Phase = PhaseNight
-	gs.DayNumber++
-	gs.NightActions = make(map[PlayerID]NightAction)
-	gs.Nominations = make(map[PlayerID]*Nomination)
-	gs.ActiveTrial = nil
-	gs.LastWordsPlayer = nil
-	gs.Accusations = make(map[PlayerID][]PlayerID)
-	gs.DefenseUsed = make(map[PlayerID]bool)
-	gs.Whispers = nil
-	gs.SpeakCount = make(map[PlayerID]int)
-
-	for _, p := range gs.Players {
-		p.ProtectedTonight = false
-	}
-
-	gs.AppendLog("phase_change", map[string]interface{}{"phase": "night", "day": gs.DayNumber})
-
-	effects := []SideEffect{
-		SendGroupEffect{gs.ChatID, nightNarration(gs.DayNumber, len(gs.AlivePlayers()))},
-	}
-
-	// Nobody has an action to submit tonight, so arming a timer and waiting
-	// out the clock would just be dead air.
-	if allNightActionsSubmitted(gs) {
-		resolved, resolvedEffects := resolveNight(gs)
-		return resolved, append(effects, resolvedEffects...)
-	}
-
-	effects = append(effects, armPhase(gs, PhaseNight)...)
-	effects = append(effects, nightPrompts(gs, false)...)
-	return gs, effects
-}
-
-func filterTargets(all []PlayerID, self PlayerID, selfTeam Team, gs *GameState) []PlayerID {
-	var targets []PlayerID
-	for _, pid := range all {
-		if pid == self {
-			continue
-		}
-		if selfTeam == TeamMafia && RoleTeam(gs.Players[pid].Role) == TeamMafia {
-			continue
-		}
-		targets = append(targets, pid)
-	}
-	return targets
-}
-
-func filterOutSelf(all []PlayerID, self PlayerID) []PlayerID {
-	var result []PlayerID
-	for _, pid := range all {
-		if pid != self {
-			result = append(result, pid)
-		}
-	}
-	return result
-}
-
-func reduceNightAction(gs *GameState, e NightActionEvent) (*GameState, []SideEffect) {
-	if gs.Phase != PhaseNight {
-		return gs, []SideEffect{
-			SendDMEffect{e.Action.ActorID, "⏰ The night phase has ended. Your action was not recorded."},
-		}
-	}
-	// Must match the eligibility used by allNightActionsSubmitted, or a player
-	// the phase is not waiting on could still steer the outcome.
-	p, exists := gs.Players[e.Action.ActorID]
-	if !exists || !p.CanAct() {
-		return gs, nil
-	}
-
-	if !validActionForRole(p.Role, e.Action.Kind) {
-		return gs, nil
-	}
-
-	// Validate target is alive
-	target, exists := gs.Players[e.Action.TargetID]
-	if !exists || !target.Alive {
-		return gs, []SideEffect{
-			SendDMEffect{e.Action.ActorID, "❌ Invalid target. That player is not alive."},
-		}
-	}
-
-	// Doctor self-protect check
-	if e.Action.Kind == ActionDoctorProtect && e.Action.TargetID == e.Action.ActorID && !gs.Config.DoctorSelfProtect {
-		return gs, []SideEffect{
-			SendDMEffect{e.Action.ActorID, "❌ You cannot protect yourself."},
-		}
-	}
-
-	// Mafia can't target teammates
-	if e.Action.Kind == ActionMafiaKill && RoleTeam(target.Role) == TeamMafia {
-		return gs, []SideEffect{
-			SendDMEffect{e.Action.ActorID, "❌ You cannot target a fellow mafia member."},
-		}
-	}
-
-	// Mafia have no kill on the first night in the classic variant
-	if e.Action.Kind == ActionMafiaKill && gs.DayNumber == 1 && !gs.Config.FirstNightKill {
-		return gs, []SideEffect{
-			SendDMEffect{e.Action.ActorID, "❌ There is no kill on Night 1."},
-		}
-	}
-
-	// Vigilante one-time use check
-	if e.Action.Kind == ActionVigilanteKill && p.UsedAbility {
-		return gs, []SideEffect{
-			SendDMEffect{e.Action.ActorID, "❌ You have already used your one-time kill ability."},
-		}
-	}
-
-	// Overwrite previous action (last submission wins)
-	_, hadPrevious := gs.NightActions[e.Action.ActorID]
-	gs.NightActions[e.Action.ActorID] = e.Action
-	gs.AppendLog("night_action", map[string]interface{}{
-		"actor": e.Action.ActorID,
-		"kind":  e.Action.Kind,
-	})
-
-	confirmMsg := "✅ Action recorded."
-	if hadPrevious {
-		confirmMsg = "✅ Action updated. Your new target has been recorded."
-	}
-
-	if allNightActionsSubmitted(gs) {
-		resolvedState, resolvedEffects := resolveNight(gs)
-		return resolvedState, append([]SideEffect{SendDMEffect{e.Action.ActorID, confirmMsg}}, resolvedEffects...)
-	}
-
-	return gs, []SideEffect{SendDMEffect{e.Action.ActorID, confirmMsg}}
-}
-
-func validActionForRole(role Role, kind string) bool {
-	switch role {
-	case RoleMafia, RoleGodfather:
-		return kind == ActionMafiaKill
-	case RoleDetective:
-		return kind == ActionDetectiveCheck
-	case RoleDoctor:
-		return kind == ActionDoctorProtect
-	case RoleVigilante:
-		return kind == ActionVigilanteKill
-	}
-	return false
-}
-
-func allNightActionsSubmitted(gs *GameState) bool {
-	firstNight := gs.DayNumber == 1
-	for _, p := range gs.Players {
-		if !p.CanAct() {
-			continue
-		}
-		switch p.Role {
-		case RoleMafia, RoleGodfather:
-			if firstNight && !gs.Config.FirstNightKill {
-				continue // no action needed on first night
-			}
-			if _, ok := gs.NightActions[p.ID]; !ok {
-				return false
-			}
-		case RoleDetective, RoleDoctor:
-			if _, ok := gs.NightActions[p.ID]; !ok {
-				return false
-			}
-		case RoleVigilante:
-			if !p.UsedAbility {
-				if _, ok := gs.NightActions[p.ID]; !ok {
-					return false
-				}
-			}
-		}
-	}
-	return true
-}
-
-// sortedNightActions gives night resolution a stable order. Ranging over the
-// map directly would make the outcome depend on Go's randomised map iteration.
-func sortedNightActions(gs *GameState) []NightAction {
-	actions := make([]NightAction, 0, len(gs.NightActions))
-	for _, a := range gs.NightActions {
-		actions = append(actions, a)
-	}
-	sort.Slice(actions, func(i, j int) bool { return actions[i].ActorID < actions[j].ActorID })
-	return actions
-}
-
-// actorMayAct decides whether a player killed earlier in this same night still
-// completes their own action.
-func actorMayAct(gs *GameState, actorID PlayerID) bool {
-	if gs.Config.SimultaneousNightActions {
-		return true
-	}
-	a, ok := gs.Players[actorID]
-	return ok && a.Alive
-}
-
-func resolveNight(gs *GameState) (*GameState, []SideEffect) {
-	gs.Phase = PhaseNightResolve
-	gs.LastNightDeaths = nil
-	gs.LastCheckResult = nil
-
-	actions := sortedNightActions(gs)
-
-	// Resolution order (documented in §8.4):
-	// 1. Doctor protection (status flag)
-	// 2. Kill sources (Mafia, Vigilante)
-	// 3. Detective check (informational)
-
-	// Step 1: Doctor protection
-	for _, action := range actions {
-		if action.Kind == ActionDoctorProtect {
-			if target, ok := gs.Players[action.TargetID]; ok {
-				target.ProtectedTonight = true
-			}
-		}
-	}
-
-	// Step 2a: Mafia kill (skipped on Night 1 if FirstNightKill is disabled)
-	firstNight := gs.DayNumber == 1
-	mafiaTarget := PlayerID(0)
-	if !firstNight || gs.Config.FirstNightKill {
-		mafiaTarget = resolveMafiaTarget(gs)
-	}
-	if mafiaTarget != 0 {
-		if target, ok := gs.Players[mafiaTarget]; ok {
-			if target.ProtectedTonight {
-				gs.AppendLog("kill_prevented", map[string]interface{}{"target": mafiaTarget, "by": "doctor"})
-			} else {
-				target.Alive = false
-				gs.LastNightDeaths = append(gs.LastNightDeaths, mafiaTarget)
-				gs.AppendLog("player_killed", map[string]interface{}{"player_id": mafiaTarget, "cause": "mafia"})
-			}
-		}
-	}
-
-	// Step 2b: Vigilante kill
-	for _, action := range actions {
-		if action.Kind != ActionVigilanteKill {
-			continue
-		}
-		if !actorMayAct(gs, action.ActorID) {
-			gs.AppendLog("action_cancelled", map[string]interface{}{"actor": action.ActorID, "reason": "actor_died"})
-			continue
-		}
-		if actor, ok := gs.Players[action.ActorID]; ok {
-			actor.UsedAbility = true
-		}
-		target, ok := gs.Players[action.TargetID]
-		if !ok {
-			continue
-		}
-		if target.ProtectedTonight {
-			gs.AppendLog("kill_prevented", map[string]interface{}{"target": action.TargetID, "by": "doctor"})
-			continue
-		}
-		if target.Alive {
-			target.Alive = false
-			gs.LastNightDeaths = append(gs.LastNightDeaths, action.TargetID)
-			gs.AppendLog("player_killed", map[string]interface{}{"player_id": action.TargetID, "cause": "vigilante"})
-		}
-	}
-
-	// Step 3: Detective check
-	var effects []SideEffect
-	for _, action := range actions {
-		if action.Kind != ActionDetectiveCheck {
-			continue
-		}
-		if !actorMayAct(gs, action.ActorID) {
-			gs.AppendLog("action_cancelled", map[string]interface{}{"actor": action.ActorID, "reason": "actor_died"})
-			continue
-		}
-		target, ok := gs.Players[action.TargetID]
-		if !ok {
-			continue
-		}
-		resultTeam := RoleTeam(target.Role)
-		if target.Role == RoleGodfather {
-			resultTeam = TeamTown // Godfather's gimmick
-		}
-		gs.LastCheckResult = &CheckResult{
-			DetectiveID: action.ActorID,
-			TargetID:    action.TargetID,
-			ResultTeam:  resultTeam,
-		}
-		// A detective who died tonight cannot act on the result, and DMing a
-		// dead player is just confusing.
-		if detective, ok := gs.Players[action.ActorID]; ok && detective.Alive {
-			effects = append(effects, SendDMEffect{
-				PlayerID: action.ActorID,
-				Text:     fmt.Sprintf("🔍 Investigation complete: %s is aligned with *%s*.", target.Label(), string(resultTeam)),
-			})
-		}
-	}
-
-	for _, pid := range gs.LastNightDeaths {
-		if p, ok := gs.Players[pid]; ok && gs.Config.RevealOnNightKill {
-			p.RoleRevealed = true
-		}
-	}
-
-	// Immediate win check after night resolution (§8.8)
-	if winner := checkWinCondition(gs); winner != nil {
-		effects = append(effects, SendGroupEffect{gs.ChatID, formatNightDeaths(gs)})
-		return endGame(gs, winner, effects)
-	}
-
-	// §8.8: Last two = 1 mafia + 1 town, currently night → short-circuit
-	alive := gs.AlivePlayers()
-	if len(alive) == 2 && gs.AliveMafiaCount() == 1 {
-		effects = append(effects, SendGroupEffect{gs.ChatID, formatNightDeaths(gs)})
-		return endGame(gs, &WinResult{Winner: TeamMafia, Description: "Mafia has taken over the town! Mafia wins! 🔪"}, effects)
-	}
-
-	// Track consecutive no-kill nights
-	if len(gs.LastNightDeaths) == 0 {
-		gs.ConsecutiveNoKillNights++
-	} else {
-		gs.ConsecutiveNoKillNights = 0
-	}
-
-	// Transition to day
-	gs.Phase = PhaseDiscussion
-	gs.Votes = make(map[PlayerID]Vote)
-	gs.Nominations = make(map[PlayerID]*Nomination)
-
-	effects = append(effects, SendGroupEffect{gs.ChatID, formatNightDeaths(gs)})
-	effects = append(effects, SendGroupEffect{gs.ChatID, dayNarration(gs.DayNumber, len(gs.AlivePlayers()))})
-	if gs.Config.NominationSystem {
-		effects = append(effects, SendGroupEffect{gs.ChatID, "💬 Discuss and use /nominate @player to put someone on trial."})
-	} else {
-		effects = append(effects, SendGroupEffect{gs.ChatID, discussionHelpText()})
-	}
-	effects = append(effects, armPhase(gs, PhaseDiscussion)...)
-
-	gs.AppendLog("phase_change", map[string]interface{}{"phase": "discussion", "day": gs.DayNumber})
-	return gs, effects
-}
-
-func resolveMafiaTarget(gs *GameState) PlayerID {
-	votes := make(map[PlayerID]int)
-	for _, action := range sortedNightActions(gs) {
-		if action.Kind == ActionMafiaKill && actorMayAct(gs, action.ActorID) {
-			votes[action.TargetID]++
-		}
-	}
-	target, _, tied := plurality(votes)
-	if tied {
-		return 0 // §8.4: a split mafia vote means no kill
-	}
-	return target
 }
 
 // plurality returns the single highest-voted entry. When two or more entries
@@ -911,56 +635,6 @@ func plurality(tally map[PlayerID]int) (winner PlayerID, count int, tied bool) {
 	return winner, count, share > 1
 }
 
-func formatNightDeaths(gs *GameState) string {
-	if len(gs.LastNightDeaths) == 0 {
-		return "☀️ The sun rises... *no one* died last night!"
-	}
-	msg := "☀️ The sun rises... "
-	for i, pid := range gs.LastNightDeaths {
-		p := gs.Players[pid]
-		if i > 0 {
-			msg += " and "
-		}
-		msg += p.Label()
-		if gs.Config.RevealOnNightKill {
-			msg += fmt.Sprintf(" (%s)", string(p.Role))
-		}
-	}
-	msg += " was found dead!"
-	return msg
-}
-
-func formatGameOver(gs *GameState) string {
-	description := "The game ended early."
-	if gs.Winner != nil {
-		description = gs.Winner.Description
-	}
-	msg := fmt.Sprintf("🏆 *Game Over!* %s\n\n*Final Roles:*\n", description)
-	for _, p := range playersByJoinTime(gs) {
-		status := "💀"
-		if p.Alive {
-			status = "✅"
-		}
-		// A game ended from the lobby has no roles to reveal, so naming a team
-		// there would be misleading.
-		if p.Role == RoleUnassigned {
-			msg += fmt.Sprintf("%s %s — no role assigned\n", status, p.Label())
-			continue
-		}
-		msg += fmt.Sprintf("%s %s — %s (%s)\n", status, p.Label(), string(p.Role), RoleTeam(p.Role))
-	}
-	if len(gs.JesterWon) > 0 {
-		msg += "\n🃏 Jester winners: "
-		for i, pid := range gs.JesterWon {
-			if i > 0 {
-				msg += ", "
-			}
-			msg += gs.Players[pid].Label()
-		}
-	}
-	return msg
-}
-
 // endGame is the single exit point for a finished game so the phase, winner,
 // reveal state, and effect ordering stay consistent.
 func endGame(gs *GameState, winner *WinResult, effects []SideEffect) (*GameState, []SideEffect) {
@@ -970,28 +644,59 @@ func endGame(gs *GameState, winner *WinResult, effects []SideEffect) (*GameState
 	for _, p := range gs.Players {
 		p.RoleRevealed = true
 	}
+	// Survivors take their win here, once the final board is known.
+	for _, p := range playersByID(gs) {
+		if p.Role == RoleSurvivor && p.Alive {
+			gs.JesterWon = appendUnique(gs.JesterWon, p.ID)
+		}
+	}
 	gs.AppendLog("game_over", map[string]interface{}{"winner": string(winner.Winner)})
-	effects = append(effects, SendGroupEffect{gs.ChatID, formatGameOver(gs)})
-	effects = append(effects, GameOverEffect{GameID: gs.ID, Result: *winner})
+	gs.AddTimeline("🏁", winner.Description)
+
+	summary := BuildGameSummary(gs)
+	// Carries a rematch button, so a group can go straight into another game.
+	effects = append(effects, SendGroupWithRematchEffect{gs.ChatID, FormatGameOver(gs, summary)})
+	effects = append(effects, GameOverEffect{GameID: gs.ID, Result: *winner, Summary: summary})
 	return gs, effects
 }
 
-func votingKeyboardEffect(gs *GameState) SideEffect {
-	targets := gs.AlivePlayerIDs()
-	prompt := "🗳️ *Day Vote*\nChoose one player below:"
-	if gs.ActiveTrial != nil {
-		targets = []PlayerID{*gs.ActiveTrial}
-		if p, ok := gs.Players[*gs.ActiveTrial]; ok {
-			prompt = fmt.Sprintf("🗳️ *Trial Vote*\nGuilty (lynch %s) or innocent (skip)?", p.Label())
+func appendUnique(list []PlayerID, id PlayerID) []PlayerID {
+	for _, existing := range list {
+		if existing == id {
+			return list
 		}
 	}
+	return append(list, id)
+}
+
+func votingTargets(gs *GameState) []PlayerID {
+	targets := gs.AlivePlayerIDs()
+	if gs.ActiveTrial != nil {
+		targets = []PlayerID{*gs.ActiveTrial}
+	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i] < targets[j] })
+	return targets
+}
+
+func votingKeyboardEffect(gs *GameState) SideEffect {
 	return SendVotingKeyboardEffect{
 		ChatID:       gs.ChatID,
 		GameID:       gs.ID,
-		Targets:      targets,
+		Targets:      votingTargets(gs),
 		AllowNoLynch: gs.Config.AllowNoLynch,
-		Prompt:       prompt,
+		Prompt:       FormatVoteBoard(gs),
+	}
+}
+
+// voteBoardUpdate refreshes the single live vote message in place, which is
+// much calmer than announcing every individual ballot.
+func voteBoardUpdate(gs *GameState) SideEffect {
+	return UpdateVoteBoardEffect{
+		ChatID:       gs.ChatID,
+		GameID:       gs.ID,
+		Targets:      votingTargets(gs),
+		AllowNoLynch: gs.Config.AllowNoLynch,
+		Text:         FormatVoteBoard(gs),
 	}
 }
 
@@ -1023,18 +728,25 @@ func reduceVote(gs *GameState, e VoteEvent) (*GameState, []SideEffect) {
 	_, isChange := gs.Votes[e.Vote.VoterID]
 	gs.Votes[e.Vote.VoterID] = e.Vote
 	gs.AppendLog("vote_cast", map[string]interface{}{"voter": e.Vote.VoterID, "target": e.Vote.TargetID, "changed": isChange})
+	if !isChange {
+		voter.Stats.VotesCast++
+	}
 
-	verb := "voted"
-	if isChange {
-		verb = "changed their vote"
-	}
-	choice := "*No Lynch*"
-	if e.Vote.TargetID != NoLynchTarget {
-		choice = gs.Players[e.Vote.TargetID].Label()
-	}
-	effects := []SideEffect{
-		SendGroupEffect{gs.ChatID, fmt.Sprintf("%s %s for %s. (%d/%d votes in)",
-			voter.Label(), verb, choice, len(gs.Votes), gs.EligibleVoterCount())},
+	var effects []SideEffect
+	if gs.Config.LiveVoteBoard {
+		// One message, edited in place, instead of a line per ballot.
+		effects = append(effects, voteBoardUpdate(gs))
+	} else {
+		verb := "voted"
+		if isChange {
+			verb = "changed their vote"
+		}
+		choice := "*No Lynch*"
+		if e.Vote.TargetID != NoLynchTarget {
+			choice = gs.Players[e.Vote.TargetID].Label()
+		}
+		effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf("%s %s for %s. (%d/%d votes in)",
+			voter.Label(), verb, choice, len(gs.Votes), gs.EligibleVoterCount())})
 	}
 
 	// Only players who can actually vote are counted, so one dropout does not
@@ -1047,38 +759,55 @@ func reduceVote(gs *GameState, e VoteEvent) (*GameState, []SideEffect) {
 	return gs, effects
 }
 
-// lynchThreshold is the number of votes needed to execute someone.
+// voteTally sums the ballots by target, weighted so a revealed Mayor counts
+// for more than one.
+func voteTally(gs *GameState) map[PlayerID]int {
+	tally := make(map[PlayerID]int)
+	for voterID, v := range gs.Votes {
+		weight := 1
+		if voter, ok := gs.Players[voterID]; ok {
+			weight = voter.VoteWeight()
+		}
+		tally[v.TargetID] += weight
+	}
+	return tally
+}
+
+// lynchThreshold is the vote weight needed to execute someone.
 func lynchThreshold(gs *GameState) int {
 	if !gs.Config.LynchRequiresMajority {
 		return 1
 	}
-	eligible := gs.EligibleVoterCount()
-	if eligible < 1 {
+	// Measured against total weight rather than headcount, so revealing as
+	// Mayor raises the bar for everyone instead of only helping the Mayor.
+	total := gs.TotalVoteWeight()
+	if total < 1 {
 		return 1
 	}
-	return eligible/2 + 1
+	return total/2 + 1
 }
 
 func resolveLynch(gs *GameState) (*GameState, []SideEffect) {
 	gs.Phase = PhaseLynchResolve
 
-	tally := make(map[PlayerID]int)
-	for _, v := range gs.Votes {
-		tally[v.TargetID]++
-	}
+	tally := voteTally(gs)
 	lynchTarget, maxVotes, tied := plurality(tally)
 	threshold := lynchThreshold(gs)
 
-	var effects []SideEffect
+	// The final board is worth showing even when nobody dies, so players can
+	// see how close it was.
+	effects := []SideEffect{SendGroupEffect{gs.ChatID, FormatFinalVoteBoard(gs, tally)}}
 
 	switch {
 	case tied:
 		effects = append(effects, SendGroupEffect{gs.ChatID, "⚖️ The vote is tied. No one is lynched today."})
 		gs.AppendLog("no_lynch", map[string]interface{}{"reason": "tie"})
+		gs.AddTimeline("⚖️", "The vote tied — nobody was lynched.")
 
 	case lynchTarget == NoLynchTarget:
 		effects = append(effects, SendGroupEffect{gs.ChatID, "⚖️ The town votes to spare everyone. No one is lynched today."})
 		gs.AppendLog("no_lynch", map[string]interface{}{"reason": "no_lynch_wins"})
+		gs.AddTimeline("🕊️", "The town chose to spare everyone.")
 
 	case maxVotes < threshold:
 		// Without this, a single vote in a quiet round decides an execution.
@@ -1087,6 +816,7 @@ func resolveLynch(gs *GameState) (*GameState, []SideEffect) {
 			"⚖️ %s led the vote with %d of the %d needed for a majority. No one is lynched today.",
 			target.Label(), maxVotes, threshold)})
 		gs.AppendLog("no_lynch", map[string]interface{}{"reason": "no_majority", "votes": maxVotes, "needed": threshold})
+		gs.AddTimeline("⚖️", fmt.Sprintf("%s led the vote but escaped a majority.", target.PlainName()))
 
 	default:
 		target := gs.Players[lynchTarget]
@@ -1117,23 +847,55 @@ func resolveLynch(gs *GameState) (*GameState, []SideEffect) {
 
 func executeLynch(gs *GameState, lynchTarget PlayerID, maxVotes int, effects []SideEffect) (*GameState, []SideEffect) {
 	target := gs.Players[lynchTarget]
-	target.Alive = false
 	gs.ActiveTrial = nil
 	gs.AppendLog("player_lynched", map[string]interface{}{"player_id": lynchTarget, "votes": maxVotes})
+
+	// Credit everyone who voted for a genuine threat before the reveal, so
+	// the end-of-game awards can name the sharpest reader of the room.
+	targetWasEvil := RoleTeam(target.Role) == TeamMafia || RoleTeam(target.Role) == TeamKiller
+	if targetWasEvil {
+		for voterID, v := range gs.Votes {
+			if v.TargetID != lynchTarget {
+				continue
+			}
+			if voter, ok := gs.Players[voterID]; ok {
+				voter.Stats.VotesOnEvil++
+			}
+		}
+	}
+
+	deaths := killPlayer(gs, lynchTarget, "lynch")
 
 	roleReveal := ""
 	if gs.Config.RevealOnLynch {
 		target.RoleRevealed = true
-		roleReveal = fmt.Sprintf(" They were a *%s*.", string(target.Role))
+		roleReveal = fmt.Sprintf(" They were %s.", RoleBadge(target.Role))
 	}
 	effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf(
 		"💀 %s has been executed by the town.%s", target.Label(), roleReveal)})
+	gs.AddTimeline("💀", fmt.Sprintf("%s was lynched with %d votes.", target.PlainName(), maxVotes))
+
+	// A lover follows the condemned to the grave in front of everyone.
+	for _, dead := range deaths {
+		if dead == lynchTarget {
+			continue
+		}
+		if p, ok := gs.Players[dead]; ok {
+			if gs.Config.RevealOnLynch {
+				p.RoleRevealed = true
+			}
+			effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf(
+				"💔 %s could not bear the loss and died of grief.", p.Label())})
+			gs.AddTimeline("💔", fmt.Sprintf("%s died of grief.", p.PlainName()))
+		}
+	}
 
 	// Jester win check (§2.2)
 	if target.Role == RoleJester {
-		gs.JesterWon = append(gs.JesterWon, lynchTarget)
+		gs.JesterWon = appendUnique(gs.JesterWon, lynchTarget)
 		effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf(
 			"🃏 %s was the *Jester* and wins! The game continues for everyone else.", target.Label())})
+		gs.AddTimeline("🃏", fmt.Sprintf("%s won as the Jester.", target.PlainName()))
 	}
 
 	if winner := checkWinCondition(gs); winner != nil {
@@ -1144,6 +906,10 @@ func executeLynch(gs *GameState, lynchTarget PlayerID, maxVotes int, effects []S
 	return nightState, append(effects, nightEffects...)
 }
 
+// checkWinCondition decides whether the game is over. With three hostile
+// possibilities on the board — mafia, a lone killer, and neutrals who win on
+// their own terms — a faction only wins once every rival killer is gone or it
+// holds enough of the board that nothing can stop it.
 func checkWinCondition(gs *GameState) *WinResult {
 	// Before roles are dealt every role is the empty string, which maps to
 	// town — so an unstarted game would immediately report "all mafia dead".
@@ -1151,28 +917,39 @@ func checkWinCondition(gs *GameState) *WinResult {
 		return nil
 	}
 
-	mafiaAlive := gs.AliveMafiaCount()
-	townAlive := gs.AliveTownCount()
-	neutralAlive := gs.AliveNeutralCount()
+	mafia := gs.AliveMafiaCount()
+	town := gs.AliveTownCount()
+	neutral := gs.AliveNeutralCount()
+	killers := gs.AliveKillerCount()
+	total := mafia + town + neutral + killers
 
-	if mafiaAlive == 0 {
-		return &WinResult{Winner: TeamTown, Description: "All mafia have been eliminated! Town wins! 🎉"}
-	}
-
-	if mafiaAlive >= townAlive+neutralAlive {
-		return &WinResult{Winner: TeamMafia, Description: "Mafia has taken over the town! Mafia wins! 🔪"}
+	if total == 0 {
+		return &WinResult{Winner: "", Description: "Everyone is dead. Nobody wins. ⚰️"}
 	}
 
 	// §8.8: all remaining players disconnected
-	allDisconnected := true
+	anyActive := false
 	for _, p := range gs.Players {
 		if p.CanAct() {
-			allDisconnected = false
+			anyActive = true
 			break
 		}
 	}
-	if allDisconnected {
+	if !anyActive {
 		return &WinResult{Winner: "", Description: "All players disconnected. Game void — no winner."}
+	}
+
+	if mafia == 0 && killers == 0 {
+		return &WinResult{Winner: TeamTown, Description: "Every threat has been eliminated. *Town wins!* 🎉"}
+	}
+
+	// A faction wins at parity, but only once no rival killer is left to
+	// take it from them.
+	if killers == 0 && mafia > 0 && mafia >= total-mafia {
+		return &WinResult{Winner: TeamMafia, Description: "The mafia now runs this town. *Mafia wins!* 🔪"}
+	}
+	if mafia == 0 && killers > 0 && killers >= total-killers {
+		return &WinResult{Winner: TeamKiller, Description: "The killer stalks the last of the town. *Serial Killer wins!* 🩸"}
 	}
 
 	return nil
@@ -1209,9 +986,6 @@ func reduceTimeout(gs *GameState, e TimeoutEvent) (*GameState, []SideEffect) {
 
 		var effects []SideEffect
 		effects = append(effects, SendGroupEffect{gs.ChatID, formatDiscussionSummary(gs)})
-		effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf(
-			"⚖️ *Voting phase!* You have %d seconds to cast your vote. %d votes are needed to lynch.",
-			gs.Config.VotingTimeoutSec, lynchThreshold(gs))})
 		effects = append(effects, votingKeyboardEffect(gs))
 		return gs, append(effects, armPhase(gs, PhaseVoting)...)
 
@@ -1248,6 +1022,11 @@ func reduceTimeout(gs *GameState, e TimeoutEvent) (*GameState, []SideEffect) {
 }
 
 func reduceDisconnect(gs *GameState, e PlayerDisconnectedEvent) (*GameState, []SideEffect) {
+	// A finished game has already declared a winner and written its records.
+	// Re-running the win check here could declare a second one.
+	if gs.Phase.IsTerminal() {
+		return gs, nil
+	}
 	p, exists := gs.Players[e.PlayerID]
 	if !exists {
 		return gs, nil
@@ -1300,6 +1079,13 @@ func reduceWarning(gs *GameState, e TimerWarningEvent) (*GameState, []SideEffect
 	if gs.Phase != e.Phase {
 		return gs, nil
 	}
+
+	// During a vote the countdown belongs on the board that is already there,
+	// so the warning refreshes it in place instead of adding a message.
+	if e.Phase == PhaseVoting && gs.Config.LiveVoteBoard {
+		return gs, []SideEffect{voteBoardUpdate(gs)}
+	}
+
 	var location string
 	switch e.Phase {
 	case PhaseLobby:
@@ -1315,9 +1101,30 @@ func reduceWarning(gs *GameState, e TimerWarningEvent) (*GameState, []SideEffect
 	default:
 		location = "this phase"
 	}
-	return gs, []SideEffect{
-		SendGroupEffect{gs.ChatID, fmt.Sprintf("⏰ *%d seconds* remaining for %s!", e.SecondsLeft, location)},
+
+	msg := fmt.Sprintf("⏰ *%d seconds* remaining for %s!", e.SecondsLeft, location)
+	// Naming who the night is still waiting on is the single most useful
+	// nudge, and it does not leak anything: the roster is public.
+	if e.Phase == PhaseNight {
+		if pending := pendingActorNames(gs); pending != "" {
+			msg += "\n\n_Still waiting on: " + pending + "_"
+		}
 	}
+	return gs, []SideEffect{SendGroupEffect{gs.ChatID, msg}}
+}
+
+// pendingActorNames lists players who still owe a night action.
+func pendingActorNames(gs *GameState) string {
+	var names []string
+	for _, p := range playersByJoinTime(gs) {
+		if !roleNeedsAction(gs, p) {
+			continue
+		}
+		if _, submitted := gs.NightActions[p.ID]; !submitted {
+			names = append(names, p.Label())
+		}
+	}
+	return joinStrings(names)
 }
 
 func reduceNominate(gs *GameState, e NominateEvent) (*GameState, []SideEffect) {
@@ -1328,8 +1135,11 @@ func reduceNominate(gs *GameState, e NominateEvent) (*GameState, []SideEffect) {
 		return gs, nil
 	}
 
+	// CanAct, not Alive: a player the bot cannot reach is excluded from the
+	// vote a nomination leads to, so letting them open one would put a trial
+	// in motion that they are not allowed to take part in.
 	nominator, exists := gs.Players[e.NominatorID]
-	if !exists || !nominator.Alive {
+	if !exists || !nominator.CanAct() {
 		return gs, nil
 	}
 	target, exists := gs.Players[e.TargetID]
@@ -1375,8 +1185,10 @@ func reduceSecond(gs *GameState, e SecondEvent) (*GameState, []SideEffect) {
 		return gs, nil
 	}
 
+	// Seconding forces the trial immediately, so it needs the same eligibility
+	// as voting in it.
 	seconder, exists := gs.Players[e.PlayerID]
-	if !exists || !seconder.Alive {
+	if !exists || !seconder.CanAct() {
 		return gs, nil
 	}
 
@@ -1454,9 +1266,11 @@ func reduceAccuse(gs *GameState, e AccuseEvent) (*GameState, []SideEffect) {
 		return gs, nil
 	}
 	accuser, exists := gs.Players[e.AccuserID]
-	if !exists || !accuser.Alive {
+	if !exists || !accuser.CanAct() {
 		return gs, nil
 	}
+	// The target only has to be alive: an unreachable player can still be put
+	// on trial and lynched, they just cannot drive the day themselves.
 	target, exists := gs.Players[e.TargetID]
 	if !exists || !target.Alive {
 		return gs, nil
@@ -1478,17 +1292,20 @@ func reduceAccuse(gs *GameState, e AccuseEvent) (*GameState, []SideEffect) {
 	}
 
 	gs.Accusations[e.TargetID] = append(gs.Accusations[e.TargetID], e.AccuserID)
+	accuser.Stats.Accusations++
 	gs.AppendLog("accusation", map[string]interface{}{"accuser": e.AccuserID, "target": e.TargetID})
 
 	count := len(gs.Accusations[e.TargetID])
-	aliveCount := len(gs.AlivePlayers())
+	// Measured against the players who can actually accuse, which is the same
+	// population every other majority in the game is measured against.
+	eligible := gs.EligibleVoterCount()
 
 	effects := []SideEffect{
 		SendGroupEffect{gs.ChatID, fmt.Sprintf("👉 %s accuses %s! (%d/%d accusations)",
-			accuser.Label(), target.Label(), count, aliveCount)},
+			accuser.Label(), target.Label(), count, eligible)},
 	}
 
-	if count > aliveCount/2 {
+	if count > eligible/2 {
 		effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf(
 			"⚠️ %s has been accused by the majority! %s, use /defend to make your case.",
 			target.Label(), target.Label())})
@@ -1502,7 +1319,7 @@ func reduceDefend(gs *GameState, e DefendEvent) (*GameState, []SideEffect) {
 		return gs, nil
 	}
 	player, exists := gs.Players[e.PlayerID]
-	if !exists || !player.Alive {
+	if !exists || !player.CanAct() {
 		return gs, nil
 	}
 
@@ -1532,13 +1349,14 @@ func reduceWhisper(gs *GameState, e WhisperEvent) (*GameState, []SideEffect) {
 		}
 	}
 	from, exists := gs.Players[e.FromID]
-	if !exists || !from.Alive {
+	if !exists || !from.CanAct() {
 		return gs, nil
 	}
+	// A whisper is a DM, so an unreachable recipient would never see it.
 	to, exists := gs.Players[e.ToID]
-	if !exists || !to.Alive {
+	if !exists || !to.CanAct() {
 		return gs, []SideEffect{
-			SendDMEffect{e.FromID, "That player is not alive."},
+			SendDMEffect{e.FromID, "That player can't receive whispers right now."},
 		}
 	}
 	if e.FromID == e.ToID {
@@ -1553,6 +1371,7 @@ func reduceWhisper(gs *GameState, e WhisperEvent) (*GameState, []SideEffect) {
 		Message: msg,
 		Time:    time.Now(),
 	})
+	from.Stats.Whispers++
 	gs.AppendLog("whisper", map[string]interface{}{"from": e.FromID, "to": e.ToID})
 
 	escaped := EscapeMD(msg)
@@ -1568,13 +1387,17 @@ func reducePlayerSpoke(gs *GameState, e PlayerSpokeEvent) (*GameState, []SideEff
 	if gs.Phase != PhaseDiscussion && gs.Phase != PhaseNomination {
 		return gs, nil
 	}
-	if _, exists := gs.Players[e.PlayerID]; !exists {
+	p, exists := gs.Players[e.PlayerID]
+	if !exists {
 		return gs, nil
 	}
 	if gs.SpeakCount == nil {
 		gs.SpeakCount = make(map[PlayerID]int)
 	}
+	// SpeakCount resets each day for the silent-player check; Stats.Messages
+	// accumulates over the whole game for the awards.
 	gs.SpeakCount[e.PlayerID]++
+	p.Stats.Messages++
 	return gs, nil
 }
 
@@ -1634,14 +1457,23 @@ func reduceKick(gs *GameState, e KickEvent) (*GameState, []SideEffect) {
 		}
 	}
 
-	target.Alive = false
 	target.Disconnected = true
 	delete(gs.Votes, e.TargetID)
 	delete(gs.NightActions, e.TargetID)
+	deaths := killPlayer(gs, e.TargetID, "kicked")
 	gs.AppendLog("player_kicked", map[string]interface{}{"player_id": e.TargetID, "by": e.HostID})
 
 	effects := []SideEffect{
 		SendGroupEffect{gs.ChatID, fmt.Sprintf("🚪 %s has been kicked from the game by the host.", target.Label())},
+	}
+	for _, dead := range deaths {
+		if dead == e.TargetID {
+			continue
+		}
+		if p, ok := gs.Players[dead]; ok {
+			effects = append(effects, SendGroupEffect{gs.ChatID, fmt.Sprintf(
+				"💔 %s could not bear the loss and died of grief.", p.Label())})
+		}
 	}
 
 	if winner := checkWinCondition(gs); winner != nil {
@@ -1747,6 +1579,10 @@ func formatDiscussionSummary(gs *GameState) string {
 		msg += fmt.Sprintf("\n🤫 %d whisper(s) exchanged.\n", len(gs.Whispers))
 	}
 
+	if mood := formatMood(gs); mood != "" {
+		msg += "\n" + mood
+	}
+
 	var silent []string
 	for _, p := range playersByJoinTime(gs) {
 		if !p.Alive {
@@ -1763,12 +1599,17 @@ func formatDiscussionSummary(gs *GameState) string {
 	return msg
 }
 
-func discussionHelpText() string {
-	return `💬 *Discussion Commands:*
+func discussionHelpText(gs *GameState) string {
+	msg := `💬 *Your options right now:*
 • /accuse @player — publicly accuse someone
-• /defend [statement] — make your defense (once per day)
-• /whisper @player [message] — send a private whisper (group sees it happened!)
-• /status — view game status
+• /defend [statement] — make your case (once per day)
+• /whisper @player [message] — a private note (the group sees it happened)
+• /graveyard — who has died, and what they were
+• /status — the current state of play`
 
-_Discuss, argue, bluff, and deceive. The vote is coming..._`
+	if gs.Config.GhostChat {
+		msg += "\n\n_Eliminated? DM me `/ghost <message>` to talk with the other ghosts._"
+	}
+	msg += "\n\n_Discuss, argue, bluff, deceive. The vote is coming..._"
+	return msg
 }

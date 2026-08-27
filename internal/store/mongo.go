@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/segni/mafia-bot/internal/engine"
+	"github.com/segni/mafia-bot/internal/stats"
 )
 
 type MongoStore struct {
@@ -20,6 +21,9 @@ type MongoStore struct {
 	waitlists   *mongo.Collection
 	dmConfirmed *mongo.Collection
 	cooldowns   *mongo.Collection
+	playerStats *mongo.Collection
+	history     *mongo.Collection
+	settings    *mongo.Collection
 }
 
 func NewMongoStore(uri, dbName string) (*MongoStore, error) {
@@ -40,7 +44,7 @@ func NewMongoStore(uri, dbName string) (*MongoStore, error) {
 	// Create indexes
 	gamesCol := db.Collection("games")
 	gamesCol.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "game_id", Value: 1}},
+		Keys:    bson.D{{Key: "game_id", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	})
 
@@ -51,19 +55,44 @@ func NewMongoStore(uri, dbName string) (*MongoStore, error) {
 
 	dmCol := db.Collection("dm_confirmed")
 	dmCol.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "player_id", Value: 1}},
+		Keys:    bson.D{{Key: "player_id", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	})
 
 	cooldownsCol := db.Collection("cooldowns")
 	cooldownsCol.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "key", Value: 1}},
+		Keys:    bson.D{{Key: "key", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	})
 	// TTL index: cooldowns expire after 30 seconds
 	cooldownsCol.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "created_at", Value: 1}},
 		Options: options.Index().SetExpireAfterSeconds(30),
+	})
+
+	statsCol := db.Collection("player_stats")
+	statsCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "player_id", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	// The leaderboard is sorted in Go but the candidate set is fetched by
+	// wins, so this index keeps that query cheap as the collection grows.
+	statsCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "wins", Value: -1}},
+	})
+	statsCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "chat_ids", Value: 1}},
+	})
+
+	historyCol := db.Collection("game_history")
+	historyCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "chat_id", Value: 1}, {Key: "ended_at", Value: -1}},
+	})
+
+	settingsCol := db.Collection("chat_settings")
+	settingsCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "chat_id", Value: 1}},
+		Options: options.Index().SetUnique(true),
 	})
 
 	return &MongoStore{
@@ -73,6 +102,9 @@ func NewMongoStore(uri, dbName string) (*MongoStore, error) {
 		waitlists:   waitlistsCol,
 		dmConfirmed: dmCol,
 		cooldowns:   cooldownsCol,
+		playerStats: statsCol,
+		history:     historyCol,
+		settings:    settingsCol,
 	}, nil
 }
 
@@ -248,4 +280,222 @@ func (m *MongoStore) HasJoinCooldown(chatID int64, playerID engine.PlayerID) (bo
 		return false, err
 	}
 	return true, nil
+}
+
+// Player records, game history, and chat settings are stored as JSON strings
+// in the same style as game state: the Go types stay the source of truth, and
+// adding a field needs no migration. A handful of fields are duplicated as
+// real BSON so Mongo can index and query them.
+
+func (m *MongoStore) LoadPlayerStats(playerID engine.PlayerID) (*stats.PlayerStats, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var doc struct {
+		StatsJSON string `bson:"stats_json"`
+	}
+	err := m.playerStats.FindOne(ctx, bson.M{"player_id": int64(playerID)}).Decode(&doc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return stats.NewPlayerStats(playerID), nil
+		}
+		return nil, fmt.Errorf("find player stats: %w", err)
+	}
+
+	var s stats.PlayerStats
+	if err := json.Unmarshal([]byte(doc.StatsJSON), &s); err != nil {
+		return nil, fmt.Errorf("unmarshal player stats: %w", err)
+	}
+	return &s, nil
+}
+
+func (m *MongoStore) SavePlayerStats(s *stats.PlayerStats) error {
+	if s == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	data, err := json.Marshal(s)
+	if err != nil {
+		return fmt.Errorf("marshal player stats: %w", err)
+	}
+
+	update := bson.M{
+		"$set": bson.M{
+			"player_id":   int64(s.PlayerID),
+			"username":    s.Username,
+			"wins":        s.Wins,
+			"games":       s.GamesPlayed,
+			"stats_json":  string(data),
+			"last_played": s.LastPlayed,
+		},
+	}
+	_, err = m.playerStats.UpdateOne(ctx,
+		bson.M{"player_id": int64(s.PlayerID)}, update, options.Update().SetUpsert(true))
+	return err
+}
+
+// topPlayerCandidates bounds how many records the leaderboard pulls back
+// before ranking them in Go. The score blends win rate and streaks, so the
+// top of the final board is not simply the top by wins — but a player far
+// enough down the win list cannot reach the visible top either.
+const topPlayerCandidates = 200
+
+func (m *MongoStore) TopPlayers(chatID int64, limit int) ([]*stats.PlayerStats, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	filter := bson.M{}
+	if chatID != 0 {
+		filter["chat_ids"] = chatID
+	}
+
+	opts := options.Find().
+		SetSort(bson.D{{Key: "wins", Value: -1}}).
+		SetLimit(topPlayerCandidates)
+
+	cursor, err := m.playerStats.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, fmt.Errorf("top players: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var all []*stats.PlayerStats
+	for cursor.Next(ctx) {
+		var doc struct {
+			StatsJSON string `bson:"stats_json"`
+		}
+		if err := cursor.Decode(&doc); err != nil {
+			continue
+		}
+		var s stats.PlayerStats
+		if err := json.Unmarshal([]byte(doc.StatsJSON), &s); err != nil {
+			continue
+		}
+		all = append(all, &s)
+	}
+
+	ranked := stats.Leaderboard(all)
+	if limit > 0 && len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	return ranked, nil
+}
+
+func (m *MongoStore) SaveGameRecord(record *stats.GameRecord) error {
+	if record == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	data, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("marshal game record: %w", err)
+	}
+
+	doc := bson.M{
+		"game_id":     string(record.GameID),
+		"chat_id":     record.ChatID,
+		"ended_at":    record.EndedAt,
+		"winner":      string(record.Winner),
+		"days":        record.Days,
+		"record_json": string(data),
+	}
+	if _, err := m.history.InsertOne(ctx, doc); err != nil {
+		return fmt.Errorf("insert game record: %w", err)
+	}
+
+	// Tagging each participant with the chat is what makes a per-chat
+	// leaderboard possible without a second collection.
+	for _, p := range record.Players {
+		_, err := m.playerStats.UpdateOne(ctx,
+			bson.M{"player_id": int64(p.ID)},
+			bson.M{
+				"$addToSet": bson.M{"chat_ids": record.ChatID},
+				"$setOnInsert": bson.M{
+					"player_id": int64(p.ID),
+				},
+			},
+			options.Update().SetUpsert(true))
+		if err != nil {
+			return fmt.Errorf("tag player %d with chat: %w", p.ID, err)
+		}
+	}
+	return nil
+}
+
+func (m *MongoStore) LastGameRecord(chatID int64) (*stats.GameRecord, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	opts := options.FindOne().SetSort(bson.D{{Key: "ended_at", Value: -1}})
+	var doc struct {
+		RecordJSON string `bson:"record_json"`
+	}
+	err := m.history.FindOne(ctx, bson.M{"chat_id": chatID}, opts).Decode(&doc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find last game: %w", err)
+	}
+
+	var record stats.GameRecord
+	if err := json.Unmarshal([]byte(doc.RecordJSON), &record); err != nil {
+		return nil, fmt.Errorf("unmarshal game record: %w", err)
+	}
+	return &record, nil
+}
+
+func (m *MongoStore) LoadChatSettings(chatID int64) (*ChatSettings, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var doc struct {
+		SettingsJSON string `bson:"settings_json"`
+	}
+	err := m.settings.FindOne(ctx, bson.M{"chat_id": chatID}).Decode(&doc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return NewChatSettings(chatID), nil
+		}
+		return nil, fmt.Errorf("find chat settings: %w", err)
+	}
+
+	var s ChatSettings
+	if err := json.Unmarshal([]byte(doc.SettingsJSON), &s); err != nil {
+		return nil, fmt.Errorf("unmarshal chat settings: %w", err)
+	}
+	if s.Overrides == nil {
+		s.Overrides = make(map[string]string)
+	}
+	return &s, nil
+}
+
+func (m *MongoStore) SaveChatSettings(s *ChatSettings) error {
+	if s == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	s.UpdatedAt = time.Now()
+	data, err := json.Marshal(s)
+	if err != nil {
+		return fmt.Errorf("marshal chat settings: %w", err)
+	}
+
+	update := bson.M{
+		"$set": bson.M{
+			"chat_id":       s.ChatID,
+			"preset":        s.Preset,
+			"settings_json": string(data),
+			"updated_at":    s.UpdatedAt,
+		},
+	}
+	_, err = m.settings.UpdateOne(ctx,
+		bson.M{"chat_id": s.ChatID}, update, options.Update().SetUpsert(true))
+	return err
 }

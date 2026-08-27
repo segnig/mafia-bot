@@ -66,9 +66,16 @@ type TimeoutEvent struct {
 
 func (TimeoutEvent) eventTag() {}
 
-// RolesDeliveredEvent is dispatched by the transport once every role DM for
-// this game has been handed to the sender.
-type RolesDeliveredEvent struct{}
+// RolesDeliveredEvent is dispatched by the transport once every role DM of one
+// deal has resolved.
+//
+// Deal identifies which deal it is reporting on. A redeal supersedes the
+// previous one, and the DMs of the abandoned attempt keep resolving afterwards,
+// so without this the completion of an old batch could start Night 1 while the
+// current deal's DMs were still in flight.
+type RolesDeliveredEvent struct {
+	Deal int
+}
 
 func (RolesDeliveredEvent) eventTag() {}
 
@@ -126,9 +133,13 @@ type KickEvent struct {
 
 func (KickEvent) eventTag() {}
 
-// RoleDeliveryFailedEvent — DM delivery failed for a player during role assignment (§8.3)
+// RoleDeliveryFailedEvent — DM delivery failed for a player during role
+// assignment (§8.3). Deal names the deal whose DM failed, so a failure from an
+// attempt that has already been superseded is ignored rather than triggering a
+// second redeal for a player who has since been sent a fresh role.
 type RoleDeliveryFailedEvent struct {
 	PlayerID PlayerID
+	Deal     int
 }
 
 func (RoleDeliveryFailedEvent) eventTag() {}
@@ -165,6 +176,37 @@ type PlayerSpokeEvent struct {
 
 func (PlayerSpokeEvent) eventTag() {}
 
+// RevealEvent — a Mayor goes public, trading secrecy for voting power.
+type RevealEvent struct {
+	PlayerID PlayerID
+}
+
+func (RevealEvent) eventTag() {}
+
+// ReactEvent — a player taps the day's mood bar.
+type ReactEvent struct {
+	PlayerID PlayerID
+	Emoji    string
+}
+
+func (ReactEvent) eventTag() {}
+
+// MafiaChatEvent — a private message from one mafia member to the rest.
+type MafiaChatEvent struct {
+	FromID  PlayerID
+	Message string
+}
+
+func (MafiaChatEvent) eventTag() {}
+
+// GhostChatEvent — a message from an eliminated player to the other ghosts.
+type GhostChatEvent struct {
+	FromID  PlayerID
+	Message string
+}
+
+func (GhostChatEvent) eventTag() {}
+
 // Side effects emitted by the reducer for the transport layer to execute
 type SideEffect interface {
 	effectTag()
@@ -185,6 +227,9 @@ type SendRoleDMEffect struct {
 	GameID   GameID
 	PlayerID PlayerID
 	Text     string
+	// Deal is the generation this DM belongs to, echoed back on the resulting
+	// event so the reducer can tell a current outcome from a superseded one.
+	Deal int
 }
 
 func (SendRoleDMEffect) effectTag() {}
@@ -231,10 +276,13 @@ type SetWarningTimerEffect struct {
 func (SetWarningTimerEffect) effectTag() {}
 
 // RolesDeliveredEffect closes the role-assignment phase. The transport turns
-// it back into a RolesDeliveredEvent once the preceding role DMs have been
-// queued, which is what advances the game into Night 1.
+// it back into a RolesDeliveredEvent once the preceding role DMs have actually
+// resolved, which is what advances the game into Night 1.
 type RolesDeliveredEffect struct {
 	GameID GameID
+	// Deal must match the SendRoleDMEffects that precede it: it is what tells
+	// the transport which batch this seals.
+	Deal int
 }
 
 func (RolesDeliveredEffect) effectTag() {}
@@ -242,9 +290,42 @@ func (RolesDeliveredEffect) effectTag() {}
 type GameOverEffect struct {
 	GameID GameID
 	Result WinResult
+	// Summary is everything the transport needs to write history, update
+	// player records, and hand out achievements.
+	Summary GameSummary
 }
 
 func (GameOverEffect) effectTag() {}
+
+// UpdateVoteBoardEffect edits the live vote message in place. The transport
+// falls back to sending a fresh board if it has no message to edit.
+type UpdateVoteBoardEffect struct {
+	ChatID       int64
+	GameID       GameID
+	Targets      []PlayerID
+	AllowNoLynch bool
+	Text         string
+}
+
+func (UpdateVoteBoardEffect) effectTag() {}
+
+// ReactionBarEffect posts the day's one-tap mood bar.
+type ReactionBarEffect struct {
+	ChatID int64
+	GameID GameID
+	Text   string
+}
+
+func (ReactionBarEffect) effectTag() {}
+
+// SendGroupWithRematchEffect posts a message carrying a rematch button. Used
+// for the final recap so a group can go straight into another game.
+type SendGroupWithRematchEffect struct {
+	ChatID int64
+	Text   string
+}
+
+func (SendGroupWithRematchEffect) effectTag() {}
 
 // SendLobbyStatusEffect — displays the lobby card with player list and join button
 type SendLobbyStatusEffect struct {
@@ -254,6 +335,9 @@ type SendLobbyStatusEffect struct {
 	Players    []string // display names of current players
 	MinPlayers int
 	MaxPlayers int
+	// Preset names the ruleset this game will use, so players can see what
+	// they are joining before it starts.
+	Preset string
 }
 
 func (SendLobbyStatusEffect) effectTag() {}

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -12,10 +13,29 @@ type PlayerID int64
 type Team string
 
 const (
-	TeamTown    Team = "town"
-	TeamMafia   Team = "mafia"
+	TeamTown  Team = "town"
+	TeamMafia Team = "mafia"
+	// TeamKiller is the lone-wolf killer faction. It is kept separate from
+	// neutral because it has a kill and a win condition of its own, so it
+	// blocks a town win the same way the mafia does.
+	TeamKiller  Team = "killer"
 	TeamNeutral Team = "neutral"
 )
+
+// TeamLabel is the human-readable faction name used in announcements.
+func TeamLabel(t Team) string {
+	switch t {
+	case TeamTown:
+		return "Town"
+	case TeamMafia:
+		return "Mafia"
+	case TeamKiller:
+		return "Serial Killer"
+	case TeamNeutral:
+		return "Neutral"
+	}
+	return "nobody"
+}
 
 type Role string
 
@@ -28,17 +48,18 @@ const (
 	RoleGodfather  Role = "godfather"
 	RoleVigilante  Role = "vigilante"
 	RoleJester     Role = "jester"
+
+	RoleBodyguard    Role = "bodyguard"
+	RoleEscort       Role = "escort"
+	RoleFramer       Role = "framer"
+	RoleLookout      Role = "lookout"
+	RoleMayor        Role = "mayor"
+	RoleSurvivor     Role = "survivor"
+	RoleSerialKiller Role = "serial_killer"
 )
 
 func RoleTeam(r Role) Team {
-	switch r {
-	case RoleMafia, RoleGodfather:
-		return TeamMafia
-	case RoleJester:
-		return TeamNeutral
-	default:
-		return TeamTown
-	}
+	return RoleInfoFor(r).Team
 }
 
 type Phase string
@@ -90,6 +111,40 @@ type Player struct {
 	// RoleRevealed is set when this player's role has been made public, so
 	// later summaries can echo the reveal without re-deciding the rule.
 	RoleRevealed bool
+
+	// BlockedTonight is set by the Escort and clears every night. A blocked
+	// player's own night action does not resolve.
+	BlockedTonight bool
+	// FramedTonight makes an investigation report Mafia for this player.
+	FramedTonight bool
+	// LoverID links two players: when one dies the other dies of grief.
+	LoverID PlayerID
+	// ExtraVotes is added to this player's ballot, set when a Mayor reveals.
+	ExtraVotes int
+	// DiedOnDay records the day number the player was removed, 0 while alive.
+	DiedOnDay int
+	// DeathCause is how they were removed: mafia, lynch, grief, and so on.
+	DeathCause string
+	// Stats are the per-game counters that feed the end-of-game awards.
+	Stats PlayerGameStats
+}
+
+// PlayerGameStats accumulates the small facts that make an end-of-game recap
+// interesting. They are scoped to one game and copied into the summary.
+type PlayerGameStats struct {
+	VotesOnEvil   int // votes cast against a player who really was evil
+	VotesCast     int
+	Saves         int // kills prevented by this player's protection
+	Kills         int // players this player personally killed
+	CorrectChecks int // investigations that returned Mafia on a real threat
+	Whispers      int
+	Messages      int
+	Accusations   int
+}
+
+// VoteWeight is how many votes this player's ballot is worth.
+func (p *Player) VoteWeight() int {
+	return 1 + p.ExtraVotes
 }
 
 // PlainName is the player's name without any markup escaping. Use it for
@@ -127,6 +182,11 @@ const (
 	ActionDetectiveCheck = "detective_check"
 	ActionDoctorProtect  = "doctor_protect"
 	ActionVigilanteKill  = "vigilante_kill"
+	ActionBodyguardGuard = "bodyguard_guard"
+	ActionEscortBlock    = "escort_block"
+	ActionFramerFrame    = "framer_frame"
+	ActionLookoutWatch   = "lookout_watch"
+	ActionSerialKill     = "serial_kill"
 )
 
 type Vote struct {
@@ -168,6 +228,23 @@ type GameConfig struct {
 	// false, dying first cancels your action.
 	SimultaneousNightActions bool
 	OptionalRoles            []RoleDefinition
+
+	// MayorVoteWeight is the total worth of a revealed Mayor's ballot.
+	MayorVoteWeight int
+	// EnableLovers pairs two players at the deal; when one dies, so does the
+	// other.
+	EnableLovers bool
+	// LiveVoteBoard keeps a single vote message updated in place instead of
+	// announcing every ballot, which is both calmer and easier to read.
+	LiveVoteBoard bool
+	// MafiaNightChat lets the mafia talk privately through the bot at night.
+	MafiaNightChat bool
+	// GhostChat lets eliminated players talk to each other.
+	GhostChat bool
+	// DayReactions attaches a one-tap mood bar to the day announcement.
+	DayReactions bool
+	// PresetName records which preset this config came from, for display.
+	PresetName string
 }
 
 func DefaultConfig() GameConfig {
@@ -193,7 +270,74 @@ func DefaultConfig() GameConfig {
 		AllowLastWords:           true,
 		SimultaneousNightActions: true,
 		OptionalRoles:            DefaultOptionalRoles(),
+		MayorVoteWeight:          3,
+		EnableLovers:             false,
+		LiveVoteBoard:            true,
+		MafiaNightChat:           true,
+		GhostChat:                true,
+		DayReactions:             true,
+		PresetName:               PresetClassic,
 	}
+}
+
+// Preset names offered by the /settings panel.
+const (
+	PresetClassic = "classic"
+	PresetSpeed   = "speed"
+	PresetChaos   = "chaos"
+	PresetRanked  = "ranked"
+)
+
+// PresetNames lists the presets in the order the settings panel shows them.
+func PresetNames() []string {
+	return []string{PresetClassic, PresetSpeed, PresetChaos, PresetRanked}
+}
+
+// PresetLabel is the display name and one-line pitch for a preset.
+func PresetLabel(name string) (string, string) {
+	switch name {
+	case PresetSpeed:
+		return "⚡ Speed", "Half-length phases for a quick game"
+	case PresetChaos:
+		return "🎲 Chaos", "Every role in play, lovers, and a serial killer"
+	case PresetRanked:
+		return "🏅 Ranked", "Strict rules: no last words, nothing revealed"
+	default:
+		return "🎭 Classic", "The balanced default ruleset"
+	}
+}
+
+// PresetConfig returns a complete config for a named preset. An unknown name
+// falls back to the default, so a stale stored setting can never break a game.
+func PresetConfig(name string) GameConfig {
+	cfg := DefaultConfig()
+	switch name {
+	case PresetSpeed:
+		cfg.PresetName = PresetSpeed
+		cfg.LobbyTimeoutSec = 180
+		cfg.NightTimeoutSec = 45
+		cfg.DiscussionTimeoutSec = 60
+		cfg.NominationTimeoutSec = 30
+		cfg.VotingTimeoutSec = 30
+		cfg.LastWordsSec = 10
+
+	case PresetChaos:
+		cfg.PresetName = PresetChaos
+		cfg.SpecialRoleDivisor = 2 // twice as many special roles
+		cfg.EnableLovers = true
+		cfg.RevealOnNightKill = true
+		cfg.DoctorSelfProtect = true
+
+	case PresetRanked:
+		cfg.PresetName = PresetRanked
+		cfg.RevealOnLynch = false
+		cfg.RevealOnNightKill = false
+		cfg.AllowLastWords = false
+		cfg.AllowNoLynch = false
+		cfg.FirstNightKill = false
+		cfg.GhostChat = false
+	}
+	return cfg
 }
 
 // PhaseTimeout returns the configured duration for a phase, or zero when the
@@ -227,13 +371,26 @@ type RoleDefinition struct {
 	ReplacesMafiaSlot bool
 }
 
+// DefaultOptionalRoles is the pool special roles are drawn from. MinPlayers
+// gates a role until the game is big enough to absorb it, and Weight decides
+// how often it shows up relative to the rest of the eligible pool.
+//
+// Roles that join the mafia must set ReplacesMafiaSlot, otherwise they would
+// add an extra enemy on top of the computed mafia count and skew the balance.
 func DefaultOptionalRoles() []RoleDefinition {
 	return []RoleDefinition{
 		{RoleDetective, TeamTown, 6, 1.0, false},
 		{RoleDoctor, TeamTown, 7, 0.9, false},
+		{RoleEscort, TeamTown, 8, 0.5, false},
+		{RoleLookout, TeamTown, 8, 0.5, false},
+		{RoleBodyguard, TeamTown, 9, 0.45, false},
+		{RoleMayor, TeamTown, 9, 0.35, false},
 		{RoleVigilante, TeamTown, 10, 0.4, false},
 		{RoleJester, TeamNeutral, 8, 0.3, false},
+		{RoleSurvivor, TeamNeutral, 10, 0.25, false},
+		{RoleSerialKiller, TeamKiller, 11, 0.3, false},
 		{RoleGodfather, TeamMafia, 9, 0.5, true},
+		{RoleFramer, TeamMafia, 11, 0.35, true},
 	}
 }
 
@@ -287,6 +444,35 @@ type GameState struct {
 
 	// Statistics
 	ConsecutiveNoKillNights int
+
+	// StartedAt is when roles were dealt, so the recap can report how long
+	// the game actually ran rather than how long the lobby sat open.
+	StartedAt time.Time
+	// DealNumber counts how many times roles have been dealt. Every role DM
+	// and every event reporting on one carries the deal it belongs to, so a
+	// redeal cleanly supersedes the attempt before it: outcomes from the
+	// abandoned deal keep arriving and must be ignored rather than allowed to
+	// close the phase or trigger a second removal.
+	DealNumber int
+	// NightVisits maps a visited player to everyone who came to their door
+	// last night. It is what the Lookout reads.
+	NightVisits map[PlayerID][]PlayerID
+	// Reactions counts the day's one-tap mood taps, and ReactedBy holds each
+	// player's current pick so they can change it but not stuff the ballot.
+	Reactions map[string]int
+	ReactedBy map[PlayerID]string
+	// DeathOrder is every elimination in the order it happened, which drives
+	// the first-blood award and the graveyard listing.
+	DeathOrder []PlayerID
+	// Timeline is the human-readable story of the game, shown in the recap.
+	Timeline []TimelineEntry
+}
+
+// TimelineEntry is one beat of the recap: what happened, and when.
+type TimelineEntry struct {
+	Day  int
+	Icon string
+	Text string
 }
 
 type Whisper struct {
@@ -323,9 +509,24 @@ func NewGameState(gameID GameID, chatID int64, hostID PlayerID, cfg GameConfig) 
 		Accusations:  make(map[PlayerID][]PlayerID),
 		DefenseUsed:  make(map[PlayerID]bool),
 		SpeakCount:   make(map[PlayerID]int),
+		NightVisits:  make(map[PlayerID][]PlayerID),
+		Reactions:    make(map[string]int),
+		ReactedBy:    make(map[PlayerID]string),
 		Config:       cfg,
 		CreatedAt:    time.Now(),
 		Log:          []GameEvent{},
+	}
+}
+
+// maxTimelineEntries bounds the recap. A very long game would otherwise grow
+// the stored document without limit.
+const maxTimelineEntries = 120
+
+// AddTimeline records one beat of the story for the end-of-game recap.
+func (gs *GameState) AddTimeline(icon, text string) {
+	gs.Timeline = append(gs.Timeline, TimelineEntry{Day: gs.DayNumber, Icon: icon, Text: text})
+	if len(gs.Timeline) > maxTimelineEntries {
+		gs.Timeline = append([]TimelineEntry(nil), gs.Timeline[len(gs.Timeline)-maxTimelineEntries:]...)
 	}
 }
 
@@ -391,6 +592,70 @@ func (gs *GameState) AliveNeutralCount() int {
 	return count
 }
 
+// AliveKillerCount counts the lone-wolf killer faction, which is neither town
+// nor mafia but still has to die before the town can win.
+func (gs *GameState) AliveKillerCount() int {
+	count := 0
+	for _, p := range gs.Players {
+		if p.Alive && RoleTeam(p.Role) == TeamKiller {
+			count++
+		}
+	}
+	return count
+}
+
+// TeammatesOf lists the other living members of a player's faction. Only the
+// mafia are told who they are, so this is used for their coordination DMs.
+func (gs *GameState) TeammatesOf(id PlayerID) []*Player {
+	self, ok := gs.Players[id]
+	if !ok {
+		return nil
+	}
+	team := RoleTeam(self.Role)
+	var mates []*Player
+	for _, p := range gs.Players {
+		if p.ID != id && p.Alive && RoleTeam(p.Role) == team {
+			mates = append(mates, p)
+		}
+	}
+	sort.Slice(mates, func(i, j int) bool { return mates[i].ID < mates[j].ID })
+	return mates
+}
+
+// TotalVoteWeight is the combined worth of every ballot that could be cast,
+// which is what a majority is measured against.
+func (gs *GameState) TotalVoteWeight() int {
+	total := 0
+	for _, p := range gs.Players {
+		if p.CanAct() {
+			total += p.VoteWeight()
+		}
+	}
+	return total
+}
+
+// DeadPlayers lists eliminated players in the order they died, which is how
+// the graveyard reads best.
+func (gs *GameState) DeadPlayers() []*Player {
+	var dead []*Player
+	seen := make(map[PlayerID]bool, len(gs.DeathOrder))
+	for _, id := range gs.DeathOrder {
+		if p, ok := gs.Players[id]; ok && !p.Alive && !seen[id] {
+			dead = append(dead, p)
+			seen[id] = true
+		}
+	}
+	// A player removed by a path that predates death tracking still belongs
+	// in the graveyard.
+	for _, p := range playersByJoinTime(gs) {
+		if !p.Alive && !seen[p.ID] {
+			dead = append(dead, p)
+			seen[p.ID] = true
+		}
+	}
+	return dead
+}
+
 // RolesAssigned reports whether roles have been dealt. Before that every role
 // is the empty string, which RoleTeam maps to town — so win checks would see
 // zero mafia and declare a town victory.
@@ -438,6 +703,20 @@ func ValidateConfig(cfg GameConfig) error {
 	}
 	if cfg.AllowLastWords && cfg.PhaseTimeout(PhaseLastWords) <= 0 {
 		return fmt.Errorf("last words enabled but LastWordsSec is not set")
+	}
+	if cfg.MayorVoteWeight < 1 {
+		return fmt.Errorf("MayorVoteWeight must be at least 1")
+	}
+	// A role that joins the mafia must take an existing mafia slot. Adding
+	// one on top of the computed count would hand the mafia a free extra
+	// member and break every balance guarantee below.
+	for _, r := range cfg.OptionalRoles {
+		if RoleTeam(r.Role) == TeamMafia && !r.ReplacesMafiaSlot {
+			return fmt.Errorf("optional mafia role %s must set ReplacesMafiaSlot", r.Role)
+		}
+		if r.MinPlayers < 1 {
+			return fmt.Errorf("optional role %s has no minimum player count", r.Role)
+		}
 	}
 	// Verify that at minimum player count, mafia can eventually win
 	minMafia := ComputeMafiaCount(cfg.MinPlayers, cfg.MafiaRatioDivisor)
@@ -514,9 +793,26 @@ func (gs *GameState) Clone() *GameState {
 		c.SpeakCount[id] = v
 	}
 
+	c.NightVisits = make(map[PlayerID][]PlayerID, len(gs.NightVisits))
+	for id, list := range gs.NightVisits {
+		c.NightVisits[id] = append([]PlayerID(nil), list...)
+	}
+
+	c.Reactions = make(map[string]int, len(gs.Reactions))
+	for k, v := range gs.Reactions {
+		c.Reactions[k] = v
+	}
+
+	c.ReactedBy = make(map[PlayerID]string, len(gs.ReactedBy))
+	for id, v := range gs.ReactedBy {
+		c.ReactedBy[id] = v
+	}
+
 	c.Whispers = append([]Whisper(nil), gs.Whispers...)
 	c.LastNightDeaths = append([]PlayerID(nil), gs.LastNightDeaths...)
 	c.JesterWon = append([]PlayerID(nil), gs.JesterWon...)
+	c.DeathOrder = append([]PlayerID(nil), gs.DeathOrder...)
+	c.Timeline = append([]TimelineEntry(nil), gs.Timeline...)
 	c.Config.OptionalRoles = append([]RoleDefinition(nil), gs.Config.OptionalRoles...)
 
 	// Each entry carries its own payload map, which the persist goroutine

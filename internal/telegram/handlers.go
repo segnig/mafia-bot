@@ -20,6 +20,7 @@ type Bot struct {
 	store        store.Store
 	outbox       chan actor.OutgoingMessage
 	roleDelivery *roleDeliveryTracker
+	boards       *boardTracker
 }
 
 func NewBot(token string, st store.Store) (*Bot, error) {
@@ -36,6 +37,7 @@ func NewBot(token string, st store.Store) (*Bot, error) {
 		store:        st,
 		outbox:       outbox,
 		roleDelivery: newRoleDeliveryTracker(),
+		boards:       newBoardTracker(),
 	}
 
 	b.sender.OnDMFailure = b.handleDMFailure
@@ -69,19 +71,71 @@ func (b *Bot) handleDMFailure(userID int64, err error) {
 	}
 }
 
-func (b *Bot) attachHooks(ga *actor.GameActor, gameID engine.GameID) {
+// startGame registers the actor and claims the delivery tracker before the
+// actor can emit anything. begin has to win that race: a role DM dispatched
+// against a forgotten game would be refused, and one dispatched against a
+// leftover batch from the previous game in this chat would inherit it.
+func (b *Bot) startGame(state *engine.GameState) *actor.GameActor {
+	gen := b.roleDelivery.begin(state.ID)
+	ga := b.supervisor.StartGame(state)
+	b.attachHooks(ga, gen)
+	return ga
+}
+
+func (b *Bot) attachHooks(ga *actor.GameActor, gen uint64) {
 	ga.OnPersist = func(s *engine.GameState) {
 		if err := b.store.Save(s); err != nil {
 			log.Printf("persist error: %v", err)
 		}
 	}
 	ga.OnFinish = func(id engine.GameID) {
-		b.roleDelivery.forget(id)
+		b.roleDelivery.forget(id, gen)
+		b.boards.forget(id)
 		if err := b.store.Delete(id); err != nil {
 			log.Printf("cleanup error for game %s: %v", id, err)
 		}
 	}
-	_ = gameID
+}
+
+// roleDMFailureEvent decides how the game should answer a role DM that did not
+// arrive.
+//
+// The two outcomes are deliberately different. A player who has blocked the bot
+// can never receive a role, so they are removed and the roles are redealt. Any
+// other error — an exhausted rate-limit retry, a 5xx, a queue that was full —
+// says nothing about whether the player is reachable, and ejecting them would
+// mean a busy minute costs the game a player, one per redeal, until the roster
+// falls below the minimum. Those are marked unreachable instead: they keep
+// their seat, count toward no quorum, and the game starts on time.
+func roleDMFailureEvent(pid engine.PlayerID, deal int, err error) engine.Event {
+	if isBotBlocked(err) {
+		return engine.RoleDeliveryFailedEvent{PlayerID: pid, Deal: deal}
+	}
+	return engine.PlayerDisconnectedEvent{PlayerID: pid}
+}
+
+func (b *Bot) reportRoleDMFailure(ga *actor.GameActor, pid engine.PlayerID, deal int, err error) {
+	ev := roleDMFailureEvent(pid, deal, err)
+	if _, transient := ev.(engine.PlayerDisconnectedEvent); transient {
+		log.Printf("role DM to %d failed without proving them unreachable, marking silent: %v", pid, err)
+	}
+	ga.Send(ev)
+}
+
+// newGameConfig builds the config for a chat's next game from its saved
+// settings, falling back to the default if anything is wrong with them.
+func (b *Bot) newGameConfig(chatID int64) engine.GameConfig {
+	settings, err := b.store.LoadChatSettings(chatID)
+	if err != nil {
+		log.Printf("settings: failed to load for chat %d, using defaults: %v", chatID, err)
+		return engine.DefaultConfig()
+	}
+	cfg := settings.Config()
+	if err := engine.ValidateConfig(cfg); err != nil {
+		log.Printf("settings: chat %d has an unplayable config (%v), using defaults", chatID, err)
+		return engine.DefaultConfig()
+	}
+	return cfg
 }
 
 // recoverGames reloads persisted game states on boot (§8.7, §8a.8)
@@ -109,8 +163,7 @@ func (b *Bot) recoverGames() {
 			continue
 		}
 
-		ga := b.supervisor.StartGame(state)
-		b.attachHooks(ga, gid)
+		ga := b.startGame(state)
 
 		b.sender.SendText(state.ChatID, "🔄 The bot has restarted. Your game has been resumed!")
 		// Timers only ever existed in memory, so without this the restored
@@ -221,6 +274,26 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdDefend(msg)
 	case "whisper":
 		b.cmdWhisper(msg)
+	case "reveal":
+		b.cmdReveal(msg)
+	case "mafia":
+		b.cmdMafiaChat(msg)
+	case "ghost":
+		b.cmdGhostChat(msg)
+	case "graveyard":
+		b.cmdGraveyard(msg)
+	case "stats":
+		b.cmdStats(msg)
+	case "leaderboard", "top":
+		b.cmdLeaderboard(msg)
+	case "achievements":
+		b.cmdAchievements(msg)
+	case "lastgame", "recap":
+		b.cmdLastGame(msg)
+	case "settings":
+		b.cmdSettings(msg)
+	case "roles":
+		b.cmdRoles(msg)
 	case "help":
 		b.cmdHelp(msg)
 	case "start":
@@ -238,19 +311,102 @@ func (b *Bot) cmdHelp(msg *tgbotapi.Message) {
 /join — join the lobby
 /leave — leave the lobby
 /begin — host starts the game
+/settings — host or admin configures the ruleset
 
 *During the day*
 /accuse @player — publicly accuse someone
 /defend [statement] — make your case (once per day)
 /whisper @player [text] — private message (the group sees that it happened)
+/reveal — Mayor goes public for a heavier vote
 /nominate @player and /second @player — trial mode only
+
+*In your DMs*
+/myrole — see your role
+/mafia [text] — talk to your mafia team at night
+/ghost [text] — talk to the other eliminated players
 
 *Anytime*
 /status — current game state
-/myrole — DM me to see your role
+/graveyard — who has died, and what they were
+/roles — every role in the game
+/stats — your record
+/leaderboard — the best players here
+/achievements — what you have unlocked
+/lastgame — recap of the previous game
 /host @player — hand over hosting
 /kick @player — host or admin removes a player
 /endgame — host or admin ends the game`)
+}
+
+func (b *Bot) cmdRoles(msg *tgbotapi.Message) {
+	b.sender.SendText(msg.Chat.ID, engine.FormatRoleList())
+}
+
+func (b *Bot) cmdReveal(msg *tgbotapi.Message) {
+	ga := b.gameFor(msg, false)
+	if ga == nil {
+		return
+	}
+	ga.Send(engine.RevealEvent{PlayerID: engine.PlayerID(msg.From.ID)})
+}
+
+func (b *Bot) cmdGraveyard(msg *tgbotapi.Message) {
+	ga := b.gameFor(msg, true)
+	if ga == nil {
+		return
+	}
+	b.sender.SendText(msg.Chat.ID, engine.FormatGraveyard(ga.State()))
+}
+
+// cmdMafiaChat and cmdGhostChat are DM-only: routing them through the group
+// would defeat the point.
+func (b *Bot) cmdMafiaChat(msg *tgbotapi.Message) {
+	b.relayPrivateChat(msg, "/mafia", func(ga *actor.GameActor, body string) {
+		ga.Send(engine.MafiaChatEvent{FromID: engine.PlayerID(msg.From.ID), Message: body})
+	})
+}
+
+func (b *Bot) cmdGhostChat(msg *tgbotapi.Message) {
+	b.relayPrivateChat(msg, "/ghost", func(ga *actor.GameActor, body string) {
+		ga.Send(engine.GhostChatEvent{FromID: engine.PlayerID(msg.From.ID), Message: body})
+	})
+}
+
+// relayPrivateChat finds the game the sender is in and hands the message body
+// to the reducer, which decides whether they are allowed to use that channel.
+func (b *Bot) relayPrivateChat(msg *tgbotapi.Message, command string, send func(*actor.GameActor, string)) {
+	if !msg.Chat.IsPrivate() {
+		b.sender.SendText(msg.Chat.ID, fmt.Sprintf("Send %s to me in a private chat, not in the group.", command))
+		return
+	}
+	body := strings.TrimSpace(msg.CommandArguments())
+	if body == "" {
+		b.sender.SendDM(msg.Chat.ID, fmt.Sprintf("Usage: `%s your message`", command))
+		return
+	}
+
+	ga := b.gameForPlayer(engine.PlayerID(msg.From.ID))
+	if ga == nil {
+		b.sender.SendDM(msg.Chat.ID, "You're not in any active game.")
+		return
+	}
+	send(ga, body)
+}
+
+// gameForPlayer finds the active game a player belongs to. A player can only
+// be in one at a time, since a game is keyed by its group chat and joining
+// requires being in that chat.
+func (b *Bot) gameForPlayer(playerID engine.PlayerID) *actor.GameActor {
+	for _, gameID := range b.supervisor.ActiveGames() {
+		ga := b.supervisor.GetGame(gameID)
+		if ga == nil {
+			continue
+		}
+		if _, ok := ga.PlayerSnapshot(playerID); ok {
+			return ga
+		}
+	}
+	return nil
 }
 
 func (b *Bot) cmdStartGame(msg *tgbotapi.Message) {
@@ -265,12 +421,7 @@ func (b *Bot) cmdStartGame(msg *tgbotapi.Message) {
 		return
 	}
 
-	cfg := engine.DefaultConfig()
-	if err := engine.ValidateConfig(cfg); err != nil {
-		b.sender.SendText(msg.Chat.ID, fmt.Sprintf("Invalid game config: %v", err))
-		return
-	}
-
+	cfg := b.newGameConfig(msg.Chat.ID)
 	hostID := engine.PlayerID(msg.From.ID)
 	state := engine.NewGameState(gameID, msg.Chat.ID, hostID, cfg)
 	state.Players[hostID] = &engine.Player{
@@ -281,8 +432,7 @@ func (b *Bot) cmdStartGame(msg *tgbotapi.Message) {
 		JoinedAt:    time.Now(),
 	}
 
-	ga := b.supervisor.StartGame(state)
-	b.attachHooks(ga, gameID)
+	ga := b.startGame(state)
 
 	if waitlist, err := b.store.GetWaitlist(msg.Chat.ID); err == nil && len(waitlist) > 0 {
 		b.sender.SendText(msg.Chat.ID, "📢 A new game is starting! Waitlisted players: tap Join below!")
@@ -548,6 +698,11 @@ func (b *Bot) cmdStatus(msg *tgbotapi.Message) {
 		return
 	}
 
+	b.sender.SendText(msg.Chat.ID, b.renderStatus(state))
+}
+
+// renderStatus is the live game status card.
+func (b *Bot) renderStatus(state *engine.GameState) string {
 	var aliveList, deadList string
 	for _, p := range sortedPlayers(state) {
 		if p.Alive {
@@ -555,12 +710,17 @@ func (b *Bot) cmdStatus(msg *tgbotapi.Message) {
 			if p.Disconnected {
 				status = "📵"
 			}
-			aliveList += fmt.Sprintf("  %s %s\n", status, p.Label())
+			line := fmt.Sprintf("  %s %s", status, p.Label())
+			// A revealed Mayor is public knowledge, so the card should say so.
+			if p.RoleRevealed && p.ExtraVotes > 0 {
+				line += fmt.Sprintf(" — %s (vote ×%d)", engine.RoleBadge(p.Role), p.VoteWeight())
+			}
+			aliveList += line + "\n"
 		} else {
 			role := ""
 			// Only echo a role that was already revealed publicly.
 			if p.RoleRevealed {
-				role = fmt.Sprintf(" (%s)", p.Role)
+				role = fmt.Sprintf(" — %s", engine.RoleBadge(p.Role))
 			}
 			deadList += fmt.Sprintf("  💀 %s%s\n", p.Label(), role)
 		}
@@ -574,7 +734,9 @@ func (b *Bot) cmdStatus(msg *tgbotapi.Message) {
 	remaining := ""
 	if !state.PhaseDeadline.IsZero() {
 		if left := int(time.Until(state.PhaseDeadline).Seconds()); left > 0 {
-			remaining = fmt.Sprintf("⏳ %ds left\n", left)
+			total := int(state.Config.PhaseTimeout(state.Phase).Seconds())
+			remaining = fmt.Sprintf("⏳ %ds left `%s`\n", left,
+				engine.ProgressBar(left, maxOf(total, left), 10))
 		}
 	}
 
@@ -593,10 +755,17 @@ func (b *Bot) cmdStatus(msg *tgbotapi.Message) {
 	)
 
 	if deadList != "" {
-		text += fmt.Sprintf("*Dead:*\n%s━━━━━━━━━━━━━━━━━━━━\n", deadList)
+		text += fmt.Sprintf("*Dead (%d):*\n%s━━━━━━━━━━━━━━━━━━━━\n",
+			len(state.Players)-len(state.AlivePlayers()), deadList)
 	}
+	return text
+}
 
-	b.sender.SendText(msg.Chat.ID, text)
+func maxOf(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func sortedPlayers(state *engine.GameState) []*engine.Player {
@@ -646,12 +815,24 @@ func (b *Bot) cmdMyRole(msg *tgbotapi.Message) {
 }
 
 func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
-	b.api.Request(tgbotapi.NewCallback(cq.ID, ""))
-
 	parts := strings.Split(cq.Data, ":")
 	if len(parts) < 2 {
+		b.answerCallback(cq, "")
 		return
 	}
+
+	// The settings and reaction handlers answer the callback themselves, so
+	// they can attach a toast explaining what happened.
+	switch parts[0] {
+	case "cfg":
+		b.handleSettingsCallback(cq, parts)
+		return
+	case "react":
+		b.handleReactCallback(cq, parts)
+		return
+	}
+
+	b.answerCallback(cq, "")
 
 	switch parts[0] {
 	case "night":
@@ -662,7 +843,114 @@ func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
 		b.handleJoinCallback(cq, parts)
 	case "lobby":
 		b.handleLobbyCallback(cq, parts)
+	case "info":
+		b.handleInfoCallback(cq, parts)
+	case "rematch":
+		b.handleRematchCallback(cq, parts)
+	case "board":
+		b.handleBoardCallback(cq, parts)
+	case "recap":
+		b.handleRecapCallback(cq, parts)
 	}
+}
+
+// handleReactCallback records a tap on the day mood bar and answers with a
+// private toast, so the group chat stays quiet.
+func (b *Bot) handleReactCallback(cq *tgbotapi.CallbackQuery, parts []string) {
+	if len(parts) < 3 {
+		b.answerCallback(cq, "")
+		return
+	}
+	ga := b.supervisor.GetGame(engine.GameID(parts[1]))
+	if ga == nil {
+		b.answerCallback(cq, "That game is over.")
+		return
+	}
+	playerID := engine.PlayerID(cq.From.ID)
+	if _, inGame := ga.PlayerSnapshot(playerID); !inGame {
+		b.answerCallback(cq, "Only players in this game can react.")
+		return
+	}
+
+	ga.Send(engine.ReactEvent{PlayerID: playerID, Emoji: parts[2]})
+	b.answerCallback(cq, parts[2]+" noted")
+}
+
+// handleInfoCallback serves the read-only panels reachable from a keyboard.
+// Format: info:<gameID>:<what>
+func (b *Bot) handleInfoCallback(cq *tgbotapi.CallbackQuery, parts []string) {
+	if len(parts) < 3 {
+		return
+	}
+	ga := b.supervisor.GetGame(engine.GameID(parts[1]))
+	if ga == nil {
+		return
+	}
+	state := ga.State()
+
+	switch parts[2] {
+	case "roles":
+		b.sender.SendText(state.ChatID, engine.FormatRoleList())
+	case "graveyard":
+		b.sender.SendText(state.ChatID, engine.FormatGraveyard(state))
+	case "status":
+		b.sender.SendText(state.ChatID, b.renderStatus(state))
+	case "settings":
+		b.sender.SendText(state.ChatID, engine.FormatSettingsPanel(state.Config))
+	}
+}
+
+// handleRematchCallback opens a fresh lobby in the same chat, hosted by
+// whoever tapped the button.
+func (b *Bot) handleRematchCallback(cq *tgbotapi.CallbackQuery, parts []string) {
+	chatID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return
+	}
+	gameID := gameIDForChat(chatID)
+	if b.supervisor.GetGame(gameID) != nil {
+		b.sender.SendText(chatID, "A game is already running here. Use /status to see it.")
+		return
+	}
+
+	hostID := engine.PlayerID(cq.From.ID)
+	// The host must be reachable by DM, or they cannot receive their role.
+	if confirmed, _ := b.store.IsDMConfirmed(hostID); !confirmed {
+		b.sender.SendText(chatID, fmt.Sprintf(
+			"%s, DM me and press /start first, then you can host a rematch.",
+			engine.EscapeMD(userLabel(cq.From))))
+		return
+	}
+
+	state := engine.NewGameState(gameID, chatID, hostID, b.newGameConfig(chatID))
+	state.Players[hostID] = &engine.Player{
+		ID:          hostID,
+		Username:    cq.From.UserName,
+		DisplayName: cq.From.FirstName,
+		Alive:       true,
+		JoinedAt:    time.Now(),
+	}
+
+	ga := b.startGame(state)
+	b.sender.SendText(chatID, fmt.Sprintf("🔄 *Rematch!* %s is hosting.",
+		engine.EscapeMD(userLabel(cq.From))))
+	ga.Send(engine.GameCreatedEvent{})
+}
+
+func (b *Bot) handleBoardCallback(cq *tgbotapi.CallbackQuery, parts []string) {
+	chatID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return
+	}
+	b.sendLeaderboard(chatID, chatID, "Top players here")
+}
+
+func (b *Bot) handleRecapCallback(cq *tgbotapi.CallbackQuery, parts []string) {
+	chatID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return
+	}
+	b.sendLastGame(chatID)
 }
 
 func (b *Bot) handleNightCallback(cq *tgbotapi.CallbackQuery, parts []string) {
@@ -773,10 +1061,11 @@ func (b *Bot) sendLobbyCard(state *engine.GameState) {
 	if host, ok := state.Players[state.HostID]; ok {
 		hostName = host.PlainName()
 	}
-	b.renderLobbyCard(state.ChatID, state.ID, hostName, names, state.Config.MinPlayers, state.Config.MaxPlayers)
+	b.renderLobbyCard(state.ChatID, state.ID, hostName, names,
+		state.Config.MinPlayers, state.Config.MaxPlayers, state.Config.PresetName)
 }
 
-func (b *Bot) renderLobbyCard(chatID int64, gameID engine.GameID, hostName string, players []string, minPlayers, maxPlayers int) {
+func (b *Bot) renderLobbyCard(chatID int64, gameID engine.GameID, hostName string, players []string, minPlayers, maxPlayers int, preset string) {
 	playerList := ""
 	for i, name := range players {
 		playerList += fmt.Sprintf("%d. %s\n", i+1, engine.EscapeMD(name))
@@ -790,17 +1079,23 @@ func (b *Bot) renderLobbyCard(chatID int64, gameID engine.GameID, hostName strin
 		readyStatus = "✅ Ready to start! Host: use /begin"
 	}
 
+	presetLabel, presetPitch := engine.PresetLabel(preset)
+
 	text := fmt.Sprintf(
 		"🎮 *MAFIA — Game Lobby*\n"+
 			"━━━━━━━━━━━━━━━━━━━━\n"+
 			"👑 Host: %s\n"+
-			"👥 Players: %d/%d\n"+
+			"👥 Players: %d/%d  `%s`\n"+
+			"⚙️ Mode: *%s* — _%s_\n"+
 			"━━━━━━━━━━━━━━━━━━━━\n"+
 			"\n%s\n"+
 			"━━━━━━━━━━━━━━━━━━━━\n"+
 			"%s\n"+
-			"\n_Tap the button below to join!_",
-		engine.EscapeMD(hostName), len(players), maxPlayers, playerList, readyStatus,
+			"\n_Tap Join below. First time? DM me /start so I can send your role._",
+		engine.EscapeMD(hostName), len(players), maxPlayers,
+		engine.ProgressBar(len(players), maxPlayers, 10),
+		engine.EscapeMD(presetLabel), engine.EscapeMD(presetPitch),
+		playerList, readyStatus,
 	)
 
 	b.sender.SendTextWithKeyboard(chatID, text, buildJoinButton(gameID))
@@ -853,29 +1148,40 @@ func (b *Bot) dispatchEffect(eff engine.SideEffect) {
 		if ga == nil {
 			return
 		}
-		gid, pid := e.GameID, e.PlayerID
-		batch := b.roleDelivery.track(gid)
+		gid, pid, deal := e.GameID, e.PlayerID, e.Deal
+		if !b.roleDelivery.track(gid, deal) {
+			return // the game ended while this DM sat in the queue
+		}
 		b.sender.SendDMWithResult(int64(pid), e.Text, func(err error) {
-			if err != nil {
-				// This player never learned their role, so the reducer has to
-				// remove them and redeal rather than start the night.
-				go ga.Send(engine.RoleDeliveryFailedEvent{PlayerID: pid})
-			}
-			if done, clean := b.roleDelivery.resolve(gid, batch, err); done && clean {
-				go ga.Send(engine.RolesDeliveredEvent{})
-			}
+			done, _ := b.roleDelivery.resolve(gid, deal, err)
+			// Both sends happen on one goroutine of their own: in order, so a
+			// failure reaches the actor before the event that would start the
+			// night, and off this one, because a callback can run on the
+			// goroutine draining the actor's outbox and a blocking send there
+			// would stop the actor that fills it.
+			go func() {
+				if err != nil {
+					b.reportRoleDMFailure(ga, pid, deal, err)
+				}
+				if done {
+					ga.Send(engine.RolesDeliveredEvent{Deal: deal})
+				}
+			}()
 		})
 
 	case engine.RolesDeliveredEffect:
-		// The reducer has finished emitting this batch. Night 1 starts once
-		// every role DM has actually been accepted by Telegram; if some are
-		// still in flight, the last callback fires the event instead.
+		// The reducer has finished emitting this deal. Night 1 starts once
+		// every role DM has actually resolved; if some are still in flight,
+		// the last callback fires the event instead.
 		ga := b.supervisor.GetGame(e.GameID)
 		if ga == nil {
 			return
 		}
-		if done, clean := b.roleDelivery.seal(e.GameID); done && clean {
-			go ga.Send(engine.RolesDeliveredEvent{})
+		// Dispatched asynchronously: this runs on the goroutine that drains the
+		// actor's outbox, and a blocking send here could stall the actor that
+		// is filling it.
+		if done, _ := b.roleDelivery.seal(e.GameID, e.Deal); done {
+			go ga.Send(engine.RolesDeliveredEvent{Deal: e.Deal})
 		}
 
 	case engine.SendVotingKeyboardEffect:
@@ -884,8 +1190,39 @@ func (b *Bot) dispatchEffect(eff engine.SideEffect) {
 			return
 		}
 		state := ga.State()
-		kb := buildVotingKeyboard(e.GameID, e.Targets, state.Players, e.AllowNoLynch)
-		b.sender.SendTextWithKeyboard(e.ChatID, e.Prompt, kb)
+		kb := buildVotingKeyboard(e.GameID, e.Targets, state.Players, e.AllowNoLynch, state.VoteCounts())
+		// A new round gets a new message; the ID is kept so every ballot cast
+		// afterwards edits this one instead of adding to the chat.
+		gid := e.GameID
+		b.boards.clearVote(gid)
+		b.sender.SendTrackedKeyboard(e.ChatID, e.Prompt, kb, func(messageID int) {
+			b.boards.setVote(gid, messageID)
+		})
+
+	case engine.UpdateVoteBoardEffect:
+		ga := b.supervisor.GetGame(e.GameID)
+		if ga == nil {
+			return
+		}
+		state := ga.State()
+		kb := buildVotingKeyboard(e.GameID, e.Targets, state.Players, e.AllowNoLynch, state.VoteCounts())
+		messageID, ok := b.boards.getVote(e.GameID)
+		if !ok {
+			// Nothing to edit — most likely the bot restarted mid-vote — so
+			// post a fresh board and track that one instead.
+			gid := e.GameID
+			b.sender.SendTrackedKeyboard(e.ChatID, e.Text, kb, func(id int) {
+				b.boards.setVote(gid, id)
+			})
+			return
+		}
+		b.sender.EditKeyboardMessage(e.ChatID, messageID, e.Text, kb)
+
+	case engine.ReactionBarEffect:
+		b.sender.SendTextWithKeyboard(e.ChatID, e.Text, buildReactionBar(e.GameID))
+
+	case engine.SendGroupWithRematchEffect:
+		b.sender.SendTextWithKeyboard(e.ChatID, e.Text, buildRematchButton(e.ChatID))
 
 	case engine.SendNightActionEffect:
 		ga := b.supervisor.GetGame(e.GameID)
@@ -893,30 +1230,20 @@ func (b *Bot) dispatchEffect(eff engine.SideEffect) {
 			return
 		}
 		state := ga.State()
-		var actionKind, prompt string
-		switch e.Role {
-		case engine.RoleMafia, engine.RoleGodfather:
-			actionKind = engine.ActionMafiaKill
-			prompt = "🔪 *Mafia Action*\nChoose a target to eliminate:"
-		case engine.RoleDetective:
-			actionKind = engine.ActionDetectiveCheck
-			prompt = "🔍 *Detective Action*\nChoose one player to investigate:"
-		case engine.RoleDoctor:
-			actionKind = engine.ActionDoctorProtect
-			prompt = "💊 *Doctor Action*\nChoose one player to protect:"
-		case engine.RoleVigilante:
-			actionKind = engine.ActionVigilanteKill
-			prompt = "🔫 *Vigilante Action*\nChoose one player to shoot (one-time ability):"
-		default:
+		info := engine.RoleInfoFor(e.Role)
+		if !info.HasNightAction() {
 			return
 		}
-		kb := buildNightActionKeyboard(e.GameID, e.Targets, state.Players, actionKind)
-		b.sender.SendDMWithKeyboard(int64(e.PlayerID), prompt, kb)
+		kb := buildNightActionKeyboard(e.GameID, e.Targets, state.Players, info.ActionKind)
+		b.sender.SendDMWithKeyboard(int64(e.PlayerID), info.ActionPrompt, kb)
 
 	case engine.SendLobbyStatusEffect:
-		b.renderLobbyCard(e.ChatID, e.GameID, e.HostName, e.Players, e.MinPlayers, e.MaxPlayers)
+		b.renderLobbyCard(e.ChatID, e.GameID, e.HostName, e.Players, e.MinPlayers, e.MaxPlayers, e.Preset)
 
 	case engine.GameOverEffect:
-		// The actor deletes the stored game once its final write has landed.
+		// The actor deletes the stored game once its final write has landed;
+		// the durable record of what happened is written here.
+		b.boards.forget(e.GameID)
+		recordResults(b.store, b.sender, e.Summary)
 	}
 }

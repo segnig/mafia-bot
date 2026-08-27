@@ -26,8 +26,10 @@ func (d *driver) send(ev Event) []SideEffect {
 		d.gs, effects = Reduce(d.gs, next)
 		all = append(all, effects...)
 		for _, eff := range effects {
-			if _, ok := eff.(RolesDeliveredEffect); ok {
-				queue = append(queue, RolesDeliveredEvent{})
+			// Echoing the deal back is what the transport does, and it is what
+			// lets a superseded batch be told apart from the current one.
+			if rd, ok := eff.(RolesDeliveredEffect); ok {
+				queue = append(queue, RolesDeliveredEvent{Deal: rd.Deal})
 			}
 		}
 	}
@@ -49,11 +51,23 @@ func newDriver(t *testing.T, cfg GameConfig, n int) *driver {
 	return &driver{t: t, gs: gs}
 }
 
+// groupTexts collects every piece of text the group chat will see, including
+// the prompts attached to keyboards. Anything in here is subject to the
+// Markdown-escaping guarantee.
 func groupTexts(effects []SideEffect) []string {
 	var out []string
 	for _, eff := range effects {
-		if g, ok := eff.(SendGroupEffect); ok {
-			out = append(out, g.Text)
+		switch e := eff.(type) {
+		case SendGroupEffect:
+			out = append(out, e.Text)
+		case SendVotingKeyboardEffect:
+			out = append(out, e.Prompt)
+		case UpdateVoteBoardEffect:
+			out = append(out, e.Text)
+		case ReactionBarEffect:
+			out = append(out, e.Text)
+		case SendGroupWithRematchEffect:
+			out = append(out, e.Text)
 		}
 	}
 	return out
@@ -1093,7 +1107,7 @@ func TestF16RevealFlagsAreIndependent(t *testing.T) {
 	if gs.Players[2].RoleRevealed {
 		t.Error("night victim's role should stay secret when RevealOnNightKill is off")
 	}
-	if strings.Contains(strings.Join(groupTexts(effects), "\n"), "villager") {
+	if strings.Contains(strings.Join(groupTexts(effects), "\n"), RoleTitle(RoleVillager)) {
 		t.Error("night death announcement leaked the role")
 	}
 
@@ -1104,7 +1118,7 @@ func TestF16RevealFlagsAreIndependent(t *testing.T) {
 	if !gs.Players[3].RoleRevealed {
 		t.Error("lynched player's role should be revealed when RevealOnLynch is on")
 	}
-	if !strings.Contains(strings.Join(groupTexts(effects), "\n"), "villager") {
+	if !strings.Contains(strings.Join(groupTexts(effects), "\n"), RoleTitle(RoleVillager)) {
 		t.Error("lynch announcement should include the role")
 	}
 }

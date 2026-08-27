@@ -2,7 +2,9 @@
 
 ## What is Mafia?
 
-Mafia (also called Werewolf) is a social deduction game. The town is infiltrated by the Mafia — a secret group of killers. During the day, everyone debates and votes to lynch a suspect. At night, the Mafia secretly eliminates a player. The town wins by finding and eliminating all Mafia members. The Mafia wins by reaching equal numbers with the town.
+Mafia (also called Werewolf) is a social deduction game. The town is infiltrated by the Mafia — a secret group of killers. During the day, everyone debates and votes to lynch a suspect. At night, the Mafia secretly eliminates a player. The town wins by finding and eliminating every threat. The Mafia wins by reaching equal numbers with everyone else.
+
+Depending on the group's settings there may also be a **Serial Killer** hunting alone, and neutrals who win on their own terms.
 
 ---
 
@@ -13,10 +15,10 @@ Mafia (also called Werewolf) is a social deduction game. The town is infiltrated
 1. **Add the bot** to your Telegram group chat
 2. **DM the bot** — send `/start` in a private message (required before joining any game)
 3. In the group, type `/startgame` to create a new lobby
-4. Others type `/join` to enter the lobby (minimum 5 players)
-5. The host types `/begin` when enough players have joined
+4. Others type `/join`, or tap **Join Lobby** on the card the bot posts
+5. The host types `/begin` when enough players have joined (minimum 5)
 
-A lobby stays open for 5 minutes. If enough players have joined by then it starts on its own; otherwise it is cancelled so it doesn't linger in the chat.
+The lobby card shows the host, the current player list, a fill bar, and which **mode** the game will use, so you know what you are joining before it starts. It stays open for 5 minutes — if enough players have joined by then it starts on its own, otherwise it is cancelled so it doesn't linger in the chat.
 
 ### Game Flow
 
@@ -24,120 +26,160 @@ A lobby stays open for 5 minutes. If enough players have joined by then it start
 LOBBY → NIGHT → DAY DISCUSSION → VOTING → NIGHT → ... → GAME OVER
 ```
 
-Each game day has two phases that repeat until one team wins:
-
-**🌙 Night Phase (90 seconds)**
-- Everyone "sleeps" — the group goes quiet
-- Special roles receive DM prompts to use their abilities
-- The Mafia secretly chooses a victim
+**🌙 Night Phase**
+- The group goes quiet
+- Roles with night abilities get inline buttons in their DM
+- With mafia chat enabled, the mafia can plan privately with `/mafia`
+- The bot names who it is still waiting on when time runs short
 
 **☀️ Day Phase**
-- *Discussion* (120 seconds) — Debate, accuse, defend, and whisper
-- *Voting* (60 seconds) — Vote to lynch a suspected Mafia member
+- *Discussion* — debate, accuse, defend, whisper, and tap the mood bar
+- *Voting* — one vote board that updates in place as ballots come in
 
 ---
 
 ## Roles
 
-### Town Team (good guys)
+Send `/roles` at any time for the full in-chat reference.
+
+### Town (good guys)
 
 | Role | Ability |
 |------|---------|
-| 🏘️ **Villager** | No special ability. Use your wits and your vote! |
-| 🔍 **Detective** | Each night, investigate one player — learn if they're Town or Mafia |
-| 💊 **Doctor** | Each night, protect one player from being killed |
-| 🔫 **Vigilante** | Once per game, kill a player at night (use wisely — you might hit a townie!) |
+| 🏘️ **Villager** | No special power. Your vote and your voice are your weapons. |
+| 🔍 **Detective** | Each night, investigate one player and learn their faction. |
+| 💊 **Doctor** | Each night, protect one player from every kill that night. |
+| 🛡️ **Bodyguard** | Each night, guard one player. If a killer comes, you take the blow — and take the attacker down with you. |
+| 💃 **Escort** | Each night, occupy one player. Whatever they planned does not happen. |
+| 🔭 **Lookout** | Each night, watch one player's house and learn exactly who came calling. |
+| 🏛️ **Mayor** | Reveal yourself once with `/reveal`. Everyone learns who you are, but your vote counts as three. |
+| 🔫 **Vigilante** | One bullet for the whole game, fired at night. Be sure. |
 
-### Mafia Team (bad guys)
+### Mafia (bad guys)
 
 | Role | Ability |
 |------|---------|
-| 🔪 **Mafia** | Each night, vote with your team to eliminate one player |
-| 🎩 **Godfather** | Same as Mafia, but appears *innocent* to the Detective! |
+| 🔪 **Mafia** | Each night, agree with your team on a victim. Disagree and nobody dies. |
+| 🎩 **Godfather** | Kills as mafia, but investigations come back **Town**. |
+| 🖊️ **Framer** | Each night, plant evidence on one player so any investigation of them that night reports **Mafia**. |
+
+### Killer
+
+| Role | Ability |
+|------|---------|
+| 🩸 **Serial Killer** | You hunt alone. Kill every night, win when nobody can stop you. Reads as Mafia. |
 
 ### Neutral
 
 | Role | Ability |
 |------|---------|
-| 🃏 **Jester** | You win if the town votes to lynch YOU. Act suspicious! |
+| 🃏 **Jester** | You win if the town lynches **you**. Be impossible to ignore. |
+| 🧥 **Survivor** | No side, no power. You win simply by being alive at the end. |
+
+### 💞 Lovers
+
+In some modes two players are secretly paired at the deal and told about each other. **When one dies, so does the other** — whatever their roles were. A mafioso paired with a townsperson has a very complicated night ahead.
 
 ### Which roles appear?
 
-Roles are randomly generated each game based on player count:
-- **Mafia count** = ~25% of players (minimum 1)
-- **Special roles** (Detective, Doctor, etc.) are randomly selected from an eligible pool — two games with the same players can have completely different role compositions!
+Roles are generated fresh each game from the player count:
+- **Mafia count** ≈ 25% of players, minimum 1
+- **Special roles** are drawn randomly from an eligible pool, and each role has a minimum player count before it can show up at all
+
+Two games with the same players can have completely different compositions. The `chaos` mode roughly doubles the number of special roles.
 
 ---
 
 ## Commands
 
-### Group Chat Commands
+### Group Chat
 
 | Command | Who | Description |
 |---------|-----|-------------|
 | `/startgame` | Anyone | Open a new game lobby |
-| `/join` | Anyone | Join the lobby |
-| `/leave` | Anyone | Leave the lobby (before game starts) |
+| `/join` / `/leave` | Anyone | Join or leave the lobby before it starts |
 | `/begin` | Host | Start the game |
 | `/endgame` | Host/Admin | Force-end the game |
-| `/status` | Anyone | Show current phase, alive/dead count |
-| `/accuse @player` | Alive | Publicly accuse someone during discussion |
-| `/defend [text]` | Alive | Make your defense statement (once per day) |
-| `/whisper @player [msg]` | Alive | Send a private whisper (group sees it happened!) |
-| `/nominate @player` | Alive | Nominate someone for trial (nomination mode) |
-| `/second @player` | Alive | Second a nomination |
-| `/host @player` | Host | Transfer host to another player |
+| `/status` | Anyone | Current phase, timer, alive and dead counts |
+| `/graveyard` | Anyone | The dead, in the order they died |
+| `/roles` | Anyone | Full role reference |
+| `/settings` | Host/Admin | Open the settings panel |
+| `/accuse @player` | Alive | Publicly accuse someone |
+| `/defend [text]` | Alive | Your defence statement (once per day) |
+| `/whisper @player [msg]` | Alive | Private message — the group sees that it happened |
+| `/reveal` | Mayor | Go public in exchange for vote weight |
+| `/nominate` / `/second` | Alive | Put someone on trial (trial mode only) |
+| `/host @player` | Host | Transfer host |
 | `/kick @player` | Host | Remove an AFK player |
 
-### DM Commands
+### Stats & History
+
+| Command | Where | Description |
+|---------|-------|-------------|
+| `/stats` | Anywhere | Your lifetime record — reply to someone or mention them for theirs |
+| `/leaderboard` | Group | Best players in this group |
+| `/leaderboard global` | Anywhere | Best players overall |
+| `/achievements` | Anywhere | What you've unlocked, and what's left |
+| `/lastgame` | Group | Recap of this group's most recent game |
+
+### DM
 
 | Command | Description |
 |---------|-------------|
 | `/start` | Register with the bot (required before joining) |
-| `/myrole` | Re-send your current role |
+| `/myrole` | Re-send your role card |
+| `/mafia <message>` | Talk to your mafia team — night only |
+| `/ghost <message>` | Talk to the other dead players |
 
-### Night Actions (via DM buttons)
+### Night Actions
 
-During the night, eligible roles receive inline buttons in their DM to select targets. You can change your choice before the timer expires — the last selection counts.
+Eligible roles get inline buttons in their DM. You can change your choice until the timer expires — the last selection counts. Your teammates see what you picked, so the mafia can actually coordinate.
 
 ---
 
 ## Discussion Phase — How to Play It
 
-The discussion phase is where the real game happens. Here's what you can do:
-
 ### 👉 Accuse (`/accuse @player`)
-Publicly point the finger at someone. The bot tracks accusations and displays a tally. If a majority accuses one player, they're prompted to defend themselves.
+Publicly point the finger. The bot tracks accusations and shows a tally. If a majority accuses one player, they're prompted to defend themselves.
 
 ### 🛡️ Defend (`/defend I was home all night...`)
-Make a formal defense statement that the bot displays prominently. You only get ONE defense per day — make it count! Best used when you're being accused.
+A formal statement the bot displays prominently. **One per day** — make it count.
 
-### 🤫 Whisper (`/whisper @player trust me, vote for Bob`)
-Send a secret message to another player. They'll receive it as a DM. **But** — the group will see a notification that you whispered to them! This creates suspicion and visible alliances.
+### 🤫 Whisper (`/whisper @player trust me, vote Bob`)
+A private DM to another player. **The group is told that you whispered to them**, though not what you said. Instant suspicion, visible alliances.
+
+### 🎭 React
+Tap the mood bar under the day announcement. The tally appears in the day summary. One reaction each; you can change it.
+
+### 🏛️ Reveal (Mayor only)
+`/reveal` trades your anonymity for voting power. Your vote starts counting as three — and the mafia now know exactly where to strike. Day only.
 
 ### 😶 Stay Silent
-The bot tracks who speaks and who stays silent. At the end of discussion, silent players are called out — being quiet can make you look suspicious!
+The bot tracks who spoke. Silent players are named in the day summary — being quiet is itself a choice, and a visible one.
 
 ### Strategy Tips
-- **Mafia**: Blend in. Accuse others to deflect suspicion. Use whispers to coordinate with teammates.
-- **Town**: Watch who's quiet, who's deflecting, and who's whispering to whom.
-- **Detective**: Don't reveal your role too early — the Mafia will kill you. Share info carefully.
-- **Doctor**: Protect players who seem important. Don't always protect yourself.
-- **Jester**: Act just suspicious enough to get lynched, but not so obvious that people catch on.
+- **Mafia**: Blend in. Deflect. Use `/mafia` at night to agree on a target before the clock runs out — a split vote kills nobody.
+- **Town**: Watch who's quiet, who's deflecting, and who whispered to whom.
+- **Detective**: Don't reveal early — and remember a **Framer** can make an innocent look guilty for exactly one night.
+- **Doctor**: Protect who matters, not always the obvious claim.
+- **Bodyguard**: You only absorb one attack per night, and you die doing it.
+- **Lookout**: Watching a likely target beats watching a suspect.
+- **Mayor**: Reveal when your vote will actually decide something. You are a target the moment you do.
+- **Jester**: Suspicious enough to be lynched, not so obvious that people catch on.
+- **Serial Killer**: The mafia are your rivals, not your allies. Let the town fight them.
 
 ---
 
 ## Voting
 
-After discussion ends, the bot posts voting buttons. You can:
-- **Vote for a player** — tap their name to cast your vote
-- **Vote "No Lynch"** — spare everyone (if enabled)
-- **Change your vote** — tap a different button before time runs out
+The bot posts one vote board and keeps rewriting it as ballots come in — the tally, who voted for whom, a bar per candidate, turnout, and the seconds left. Tap a name to vote, tap another to change it.
 
-A lynch needs a **majority of the players who can still vote** — more than half. So with 8 players alive, 5 votes are required. If the leading player falls short, or the vote ties, nobody is lynched that day. Players who have gone silent (blocked the bot or left the chat) don't count toward the total, so one dropout can't stall the round.
+A lynch needs a **majority of the total voting weight** — more than half. With 8 ordinary players that's 5. A revealed Mayor raises both their own weight *and* the bar for everyone, so revealing does not simply hand them the day. If the leader falls short or the vote ties, nobody is lynched.
+
+Players who have gone silent (blocked the bot, left the chat) don't count toward the total, so one dropout can't stall the round.
 
 ### Last Words
-When a player is voted out, they get 15 seconds to say their final words before execution. Use this to reveal information, make accusations, or go out with flair!
+A player voted out gets a few seconds for their final words before execution. Reveal something, accuse someone, or go out with flair.
 
 ---
 
@@ -145,53 +187,85 @@ When a player is voted out, they get 15 seconds to say their final words before 
 
 | Team | Wins When |
 |------|-----------|
-| 🏘️ **Town** | All Mafia members are eliminated |
-| 🔪 **Mafia** | Mafia count ≥ Town count (they can't lose a vote) |
-| 🃏 **Jester** | Gets voted out during the day (game continues for others) |
+| 🏘️ **Town** | Every mafioso **and** every serial killer is dead |
+| 🔪 **Mafia** | Mafia ≥ everyone else, and no serial killer is left alive |
+| 🩸 **Serial Killer** | At parity with no mafia left |
+| 🃏 **Jester** | The town lynches them — the game continues for everyone else |
+| 🧥 **Survivor** | Alive at the end, alongside whoever won |
+
+The mafia reaching parity does **not** end the game while a serial killer is still hunting them. Somebody still has to win it.
 
 ---
 
-## Game Variants
+## After the Game
 
-The host can configure these options (set before `/begin`):
+The recap shows every player's role, who won, a night-by-night timeline of how it happened, and the awards:
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| First Night Kill | On | If off, Mafia can't kill on Night 1 |
-| Nomination System | Off | If on, requires `/nominate` + `/second` before voting |
-| Allow No Lynch | On | Whether "No Lynch" is a voting option |
-| Lynch Requires Majority | On | If off, a plurality is enough to execute |
-| Reveal on Lynch | On | Show a lynched player's role publicly |
-| Reveal on Night Kill | Off | Show a night victim's role publicly |
-| Last Words | On | Give lynched player time to speak |
-| Doctor Self-Protect | Off | Whether Doctor can protect themselves |
-| Simultaneous Night Actions | On | If off, a player killed at night loses their own action |
+🎯 Sharpest Eye · 🛡️ Guardian Angel · ☠️ The Reaper · 🗣️ Loudest Voice · 🤫 The Schemer · 🔍 Bloodhound · 🩸 First Blood · 🕯️ Last One Standing · 😶 Silent Type
+
+An award with no clear winner is skipped rather than handed out on a tie.
+
+Then tap **🔄 Rematch** to go straight into another game, or **🏆 Leaderboard** / **📜 Recap** to look back.
+
+### Progression
+
+Every finished game updates your record: games, wins, losses, win rate, survival rate, current and best streak, and a per-role breakdown of what you actually win with. Wins move you up the ranks — 🔰 Newcomer, 🌱 Apprentice, ⭐ Regular, 🏆 Veteran, 💎 Mastermind, 👑 Legend.
+
+**Achievements** unlock permanently: your first game, your first win, a hat trick, ten wins for the town, winning as the Serial Killer, dying on the very first night, and more. A few are secret and only appear once you've earned them.
+
+A game **cancelled by the host counts as neither a win nor a loss**, and leaves your streak alone — so nobody can protect a record by walking away from a losing position.
+
+---
+
+## Game Modes & Settings
+
+`/settings` opens an inline panel for group admins and the current host. Start from a preset, then tap any individual option. Everything is saved per group and applies to the next game.
+
+| Preset | What it's for |
+|--------|---------------|
+| 🎭 **Classic** | The balanced default |
+| ⚡ **Speed** | Half-length phases for a quick game |
+| 🎲 **Chaos** | Every role in play, lovers, a serial killer, reveals on |
+| 🏅 **Ranked** | Strict: no last words, no skipping, nothing revealed |
+
+Individually tweakable: phase lengths (night, discussion, voting, lobby), reveal on lynch, reveal on night kill, majority to lynch, allow skipping, last words, night 1 kill, trial mode, lovers, mafia night chat, ghost chat, live vote board, day reactions, doctor self-heal, and special role density.
+
+A combination that couldn't produce a playable game is refused rather than saved, so `/startgame` can always trust what it reads back.
 
 ---
 
 ## Tips & Etiquette
 
-- 🚫 **Don't screenshot your DM** and share it in the group — that ruins the game
-- 🚫 **Don't use information from a previous game** about someone's play style to unfairly target them
-- ✅ **Bluffing is encouraged** — claim to be any role, lie about your investigation results, whatever it takes
-- ✅ **Dead players should not talk** — once you're eliminated, watch silently
-- ✅ **Have fun** — it's a party game! Don't take it too seriously
+- 🚫 **Don't screenshot your DM** into the group — that ruins the game
+- 🚫 **Don't carry grudges between games** to unfairly target someone
+- ✅ **Bluffing is encouraged** — claim any role, lie about your results
+- ✅ **Dead players: use `/ghost`**, not the group chat
+- ✅ **Have fun** — it's a party game
 
 ---
 
 ## FAQ
 
 **Q: The bot won't DM me!**
-A: You need to DM the bot first and send `/start`. Telegram doesn't allow bots to message users who haven't initiated contact.
+A: DM the bot first and send `/start`. Telegram doesn't allow bots to message users who haven't initiated contact.
 
 **Q: Can I be in multiple games at once?**
-A: Yes! The bot tracks games per group chat. Your DM actions are tied to the specific game via buttons.
+A: Yes. Games are tracked per group chat, and every DM button carries which game it belongs to.
 
 **Q: What happens if someone goes AFK?**
-A: Their night actions default to "no action." The host can `/kick` them. Silent players are called out during discussion summaries.
+A: Their night action defaults to no action, and the night warning names who is still missing. The host can `/kick` them. Silent players are called out in the day summary.
 
-**Q: What if the bot crashes mid-game?**
-A: Games are saved to the database after every action. On restart, all active games resume automatically.
+**Q: What if the bot restarts mid-game?**
+A: Game state is saved after every action and active games resume automatically. Live panels like the vote board may be re-posted rather than edited, which costs nothing. If the restart lands while roles are being dealt, everyone is sent their role again — the same role, so a second copy is nothing to worry about.
 
-**Q: Can spectators interfere?**
-A: No. Only registered players can vote or submit actions. Spectators see public chat but can't interact with the game mechanics.
+**Q: My investigation said Mafia but they were a Villager!**
+A: A **Framer** was in play, or you checked someone who was framed that night. Framing lasts exactly one night.
+
+**Q: Can a Doctor and a Bodyguard protect the same person?**
+A: Yes. The Doctor's treatment stops the attack outright. The Bodyguard only steps in if the target isn't already saved — and only absorbs one attack per night.
+
+**Q: The mafia had parity but the game didn't end?**
+A: A Serial Killer was still alive. A faction only takes the game once no rival killer is left to take it from them.
+
+**Q: Do dead players' votes count?**
+A: No. Only living, reachable players count toward the lynch threshold.

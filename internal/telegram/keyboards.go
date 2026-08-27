@@ -33,7 +33,16 @@ func buildNightActionKeyboard(gameID engine.GameID, targets []engine.PlayerID, p
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
-func buildVotingKeyboard(gameID engine.GameID, targets []engine.PlayerID, players map[engine.PlayerID]*engine.Player, allowNoLynch bool) tgbotapi.InlineKeyboardMarkup {
+// buildVotingKeyboard renders the ballot. Each button carries its current
+// count so a player can see the state of the vote without leaving the keyboard.
+func buildVotingKeyboard(gameID engine.GameID, targets []engine.PlayerID, players map[engine.PlayerID]*engine.Player, allowNoLynch bool, counts map[engine.PlayerID]int) tgbotapi.InlineKeyboardMarkup {
+	label := func(name string, pid engine.PlayerID) string {
+		if n := counts[pid]; n > 0 {
+			return fmt.Sprintf("%s · %d", name, n)
+		}
+		return name
+	}
+
 	var rows [][]tgbotapi.InlineKeyboardButton
 	currentRow := []tgbotapi.InlineKeyboardButton{}
 	for i, pid := range targets {
@@ -43,7 +52,7 @@ func buildVotingKeyboard(gameID engine.GameID, targets []engine.PlayerID, player
 		}
 		callbackData := fmt.Sprintf("vote:%s:%d", gameID, pid)
 		btn := tgbotapi.NewInlineKeyboardButtonData(
-			fmt.Sprintf("%d) %s", i+1, p.PlainName()),
+			label(fmt.Sprintf("%d) %s", i+1, p.PlainName()), pid),
 			callbackData,
 		)
 		currentRow = append(currentRow, btn)
@@ -58,7 +67,8 @@ func buildVotingKeyboard(gameID engine.GameID, targets []engine.PlayerID, player
 	if allowNoLynch {
 		callbackData := fmt.Sprintf("vote:%s:0", gameID)
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🕊️ Skip Today (No Lynch)", callbackData),
+			tgbotapi.NewInlineKeyboardButtonData(
+				label("🕊️ Skip Today", engine.NoLynchTarget), callbackData),
 		))
 	}
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -70,5 +80,75 @@ func buildJoinButton(gameID engine.GameID) tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("✅ Join Lobby", fmt.Sprintf("join:%s", gameID)),
 			tgbotapi.NewInlineKeyboardButtonData("ℹ️ Lobby Status", fmt.Sprintf("lobby:%s", gameID)),
 		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🎭 Roles", fmt.Sprintf("info:%s:roles", gameID)),
+			tgbotapi.NewInlineKeyboardButtonData("⚙️ Settings", fmt.Sprintf("info:%s:settings", gameID)),
+		),
 	)
+}
+
+// buildReactionBar is the day's one-tap mood bar.
+func buildReactionBar(gameID engine.GameID) tgbotapi.InlineKeyboardMarkup {
+	var row []tgbotapi.InlineKeyboardButton
+	for _, emoji := range engine.MoodEmojis() {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(
+			emoji, fmt.Sprintf("react:%s:%s", gameID, emoji)))
+	}
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(row...),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⚰️ Graveyard", fmt.Sprintf("info:%s:graveyard", gameID)),
+			tgbotapi.NewInlineKeyboardButtonData("📊 Status", fmt.Sprintf("info:%s:status", gameID)),
+		),
+	)
+}
+
+// buildRematchButton is attached to the final recap so a group can start
+// another game without typing anything.
+func buildRematchButton(chatID int64) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Rematch", fmt.Sprintf("rematch:%d", chatID)),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🏆 Leaderboard", fmt.Sprintf("board:%d", chatID)),
+			tgbotapi.NewInlineKeyboardButtonData("📜 Recap", fmt.Sprintf("recap:%d", chatID)),
+		),
+	)
+}
+
+// buildSettingsKeyboard renders the settings panel: presets on top, then one
+// button per toggle showing its current value.
+func buildSettingsKeyboard(chatID int64, cfg engine.GameConfig) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	var presetRow []tgbotapi.InlineKeyboardButton
+	for _, name := range engine.PresetNames() {
+		label, _ := engine.PresetLabel(name)
+		if name == cfg.PresetName {
+			label = "▸ " + label
+		}
+		presetRow = append(presetRow, tgbotapi.NewInlineKeyboardButtonData(
+			label, fmt.Sprintf("cfg:%d:preset:%s", chatID, name)))
+		if len(presetRow) == 2 {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(presetRow...))
+			presetRow = nil
+		}
+	}
+	if len(presetRow) > 0 {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(presetRow...))
+	}
+
+	for _, s := range engine.Settings() {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("%s — %s", s.Label, s.Display(cfg)),
+				fmt.Sprintf("cfg:%d:set:%s", chatID, s.Key)),
+		))
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("💾 Save & close", fmt.Sprintf("cfg:%d:close:x", chatID)),
+	))
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
