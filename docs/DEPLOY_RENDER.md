@@ -19,11 +19,17 @@ On the **free** web plan the instance sleeps after ~15 minutes idle. The next Te
 
 ## MongoDB Atlas (required)
 
-Render uses dynamic outbound IPs. In Atlas:
+Render uses dynamic outbound IPs. In Atlas this is the step that actually
+unblocks the bot — without it the TLS handshake fails with
+`remote error: tls: internal error` (Atlas drops the connection instead of
+saying "IP not allowed").
 
-1. **Network Access** → Add IP Address → `0.0.0.0/0` (allow from anywhere)
+1. **Network Access** → Add IP Address → **Allow Access from Anywhere** → `0.0.0.0/0`
 2. **Database Access** → Create a user with read/write on your database
-3. Copy connection string: `mongodb+srv://user:pass@cluster.mongodb.net`
+3. Copy the **Drivers** connection string:
+   `mongodb+srv://USER:PASSWORD@cluster.mongodb.net/`
+   URL-encode special characters in the password (`@` → `%40`, `#` → `%23`).
+4. In Render, set `MONGODB_URI` to that string. Do not wrap it in quotes.
 
 ## Deploy with Blueprint (easiest)
 
@@ -62,6 +68,7 @@ Render sets `PORT` and `RENDER_EXTERNAL_URL`. The bot registers
 | `MONGODB_DB` | `mafia_bot` (optional) |
 | `WEBHOOK_SECRET` | Long random string (recommended) |
 | `WEBHOOK_URL` | Optional override; defaults to `RENDER_EXTERNAL_URL` |
+| `GODEBUG` | `tlsrsakex=1` (needed for Atlas TLS on Go 1.22; set in Docker image and `render.yaml`) |
 | `RENDER` | `true` (optional, enables production logging) |
 
 5. **Create Web Service**
@@ -98,7 +105,7 @@ Without `WEBHOOK_URL`, `go run cmd/bot/main.go` **deletes any webhook** and long
 
 | Problem | Fix |
 |---|---|
-| `Failed to connect to MongoDB` | Check Atlas IP whitelist (`0.0.0.0/0`), user/password in URI |
+| `tls: internal error` / `ReplicaSetNoPrimary` | Atlas Network Access must allow `0.0.0.0/0`. Then redeploy. Also set `GODEBUG=tlsrsakex=1` (already in `render.yaml`). URL-encode the password in `MONGODB_URI`. |
 | Bot not responding | Confirm the service is a **Web Service** (not a Worker) and `/health` is 200 |
 | `setWebhook` error | `WEBHOOK_URL` / `RENDER_EXTERNAL_URL` must be `https://…` with no trailing path |
 | 401s in logs | `WEBHOOK_SECRET` changed after Telegram registered the old secret — restart so `setWebhook` runs again |

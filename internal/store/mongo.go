@@ -27,15 +27,21 @@ type MongoStore struct {
 }
 
 func NewMongoStore(uri, dbName string) (*MongoStore, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
+	opts := options.Client().
+		ApplyURI(uri).
+		SetServerSelectionTimeout(15 * time.Second).
+		SetConnectTimeout(15 * time.Second)
+
+	client, err := mongo.Connect(ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("mongo connect: %w", err)
 	}
 
 	if err := client.Ping(ctx, nil); err != nil {
+		_ = client.Disconnect(context.Background())
 		return nil, fmt.Errorf("mongo ping: %w", err)
 	}
 

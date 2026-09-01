@@ -29,3 +29,6 @@ services:
         sync: false
       - key: RENDER
         value: "true"
+      # Go 1.22 disabled RSA key-exchange; Atlas TLS still needs it on some clusters.
+      - key: GODEBUG
+        value: tlsrsakex=1
