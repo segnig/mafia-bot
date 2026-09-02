@@ -149,7 +149,7 @@ func TestHelpListsEveryRoutedCommand(t *testing.T) {
 	cmds := engine.FormatHelpCommands()
 	required := []string{
 		"/startgame", "/join", "/leave", "/begin", "/endgame",
-		"/status", "/graveyard", "/roles", "/settings", "/set",
+		"/status", "/graveyard", "/roles", "/settings", "/set", "/schedule",
 		"/accuse", "/defend", "/whisper", "/nominate", "/second", "/reveal",
 		"/stats", "/leaderboard", "/achievements", "/lastgame",
 		"/myrole", "/mafia", "/ghost", "/host", "/kick", "/help", "/guide",

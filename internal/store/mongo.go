@@ -24,6 +24,7 @@ type MongoStore struct {
 	playerStats *mongo.Collection
 	history     *mongo.Collection
 	settings    *mongo.Collection
+	scheduled   *mongo.Collection
 }
 
 func NewMongoStore(uri, dbName string) (*MongoStore, error) {
@@ -101,6 +102,15 @@ func NewMongoStore(uri, dbName string) (*MongoStore, error) {
 		Options: options.Index().SetUnique(true),
 	})
 
+	scheduledCol := db.Collection("scheduled_games")
+	scheduledCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "chat_id", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	scheduledCol.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "scheduled_at", Value: 1}},
+	})
+
 	return &MongoStore{
 		client:      client,
 		db:          db,
@@ -111,6 +121,7 @@ func NewMongoStore(uri, dbName string) (*MongoStore, error) {
 		playerStats: statsCol,
 		history:     historyCol,
 		settings:    settingsCol,
+		scheduled:   scheduledCol,
 	}, nil
 }
 
@@ -504,4 +515,91 @@ func (m *MongoStore) SaveChatSettings(s *ChatSettings) error {
 	_, err = m.settings.UpdateOne(ctx,
 		bson.M{"chat_id": s.ChatID}, update, options.Update().SetUpsert(true))
 	return err
+}
+
+func (m *MongoStore) SaveScheduledGame(sg *ScheduledGame) error {
+	if sg == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	data, err := json.Marshal(sg)
+	if err != nil {
+		return fmt.Errorf("marshal scheduled game: %w", err)
+	}
+
+	update := bson.M{
+		"$set": bson.M{
+			"chat_id":       sg.ChatID,
+			"host_id":       int64(sg.HostID),
+			"host_username": sg.HostUsername,
+			"host_name":     sg.HostName,
+			"scheduled_at":  sg.ScheduledAt,
+			"created_at":    sg.CreatedAt,
+			"schedule_json": string(data),
+		},
+	}
+	_, err = m.scheduled.UpdateOne(ctx,
+		bson.M{"chat_id": sg.ChatID}, update, options.Update().SetUpsert(true))
+	return err
+}
+
+func (m *MongoStore) GetScheduledGame(chatID int64) (*ScheduledGame, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var doc struct {
+		ScheduleJSON string `bson:"schedule_json"`
+	}
+	err := m.scheduled.FindOne(ctx, bson.M{"chat_id": chatID}).Decode(&doc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find scheduled game: %w", err)
+	}
+
+	var sg ScheduledGame
+	if err := json.Unmarshal([]byte(doc.ScheduleJSON), &sg); err != nil {
+		return nil, fmt.Errorf("unmarshal scheduled game: %w", err)
+	}
+	return &sg, nil
+}
+
+func (m *MongoStore) DeleteScheduledGame(chatID int64) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := m.scheduled.DeleteOne(ctx, bson.M{"chat_id": chatID})
+	return err
+}
+
+func (m *MongoStore) ListDueScheduledGames(before time.Time) ([]*ScheduledGame, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cursor, err := m.scheduled.Find(ctx, bson.M{
+		"scheduled_at": bson.M{"$lte": before},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list due schedules: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var due []*ScheduledGame
+	for cursor.Next(ctx) {
+		var doc struct {
+			ScheduleJSON string `bson:"schedule_json"`
+		}
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("decode scheduled game: %w", err)
+		}
+		var sg ScheduledGame
+		if err := json.Unmarshal([]byte(doc.ScheduleJSON), &sg); err != nil {
+			return nil, fmt.Errorf("unmarshal scheduled game: %w", err)
+		}
+		due = append(due, &sg)
+	}
+	return due, cursor.Err()
 }

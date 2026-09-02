@@ -72,6 +72,7 @@ func FormatHelpGeneral() string {
 	msg += "1. **DM the bot** and send `/start` — required so role DMs can reach you\n"
 	msg += "2. Add the bot to a **group chat**\n"
 	msg += "3. Someone runs `/startgame` to open a lobby\n"
+	msg += "   _(or `/schedule in 2h` to auto-open one later)_\n"
 	msg += "4. Players `/join` or tap **Join Lobby**\n"
 	msg += "5. **Host** configures rules (`/settings`, `/set`) then runs `/begin` (min 5 players)\n\n"
 
@@ -146,6 +147,7 @@ func FormatHelpCommands() string {
 
 	msg += "*Setup & lobby*\n"
 	msg += "`/startgame` — open a lobby\n"
+	msg += "`/schedule in 2h` · `/schedule at 20:00` — auto-open a lobby later\n"
 	msg += "`/join` · `/leave` — join or leave before start\n"
 	msg += "`/begin` — host starts (enough players + everyone DM'd `/start`)\n"
 	msg += "`/settings` — host configures rules in lobby\n"
@@ -327,7 +329,7 @@ func FormatHelpUnknown(topic string) string {
 // FormatGuideMessage is the /guide reply with the doc link.
 func FormatGuideMessage() string {
 	return "📚 *Player Guide*\n" + divider + "\n" +
-		"The full guide covers setup, every role, settings, commands, FAQ, and tips.\n\n" +
+		"The complete reference — every role, setting, phase, command, stat, achievement, and rule.\n\n" +
 		fmt.Sprintf("[Open the guide](%s)\n\n", PlayerGuideURL) +
 		"*In-chat shortcuts:*\n" +
 		"• `/help general` — detailed overview\n" +

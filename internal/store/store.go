@@ -46,6 +46,12 @@ type Store interface {
 	// Per-chat game settings, applied when a new lobby opens.
 	LoadChatSettings(chatID int64) (*ChatSettings, error)
 	SaveChatSettings(s *ChatSettings) error
+
+	// Scheduled lobbies (one per chat).
+	SaveScheduledGame(sg *ScheduledGame) error
+	GetScheduledGame(chatID int64) (*ScheduledGame, error)
+	DeleteScheduledGame(chatID int64) error
+	ListDueScheduledGames(before time.Time) ([]*ScheduledGame, error)
 }
 
 // ChatSettings is a group's saved game configuration. Preset names the base
@@ -120,6 +126,7 @@ type MemoryStore struct {
 	chatPlayers map[int64]map[engine.PlayerID]bool
 	lastGames   map[int64][]byte
 	settings    map[int64]*ChatSettings
+	scheduled   map[int64]*ScheduledGame
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -132,6 +139,7 @@ func NewMemoryStore() *MemoryStore {
 		chatPlayers: make(map[int64]map[engine.PlayerID]bool),
 		lastGames:   make(map[int64][]byte),
 		settings:    make(map[int64]*ChatSettings),
+		scheduled:   make(map[int64]*ScheduledGame),
 	}
 }
 
@@ -367,4 +375,46 @@ func (m *MemoryStore) SaveChatSettings(s *ChatSettings) error {
 	defer m.mu.Unlock()
 	m.settings[s.ChatID] = &copied
 	return nil
+}
+
+func (m *MemoryStore) SaveScheduledGame(sg *ScheduledGame) error {
+	if sg == nil {
+		return nil
+	}
+	copied := *sg
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.scheduled[sg.ChatID] = &copied
+	return nil
+}
+
+func (m *MemoryStore) GetScheduledGame(chatID int64) (*ScheduledGame, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	sg, ok := m.scheduled[chatID]
+	if !ok {
+		return nil, nil
+	}
+	copied := *sg
+	return &copied, nil
+}
+
+func (m *MemoryStore) DeleteScheduledGame(chatID int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.scheduled, chatID)
+	return nil
+}
+
+func (m *MemoryStore) ListDueScheduledGames(before time.Time) ([]*ScheduledGame, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var due []*ScheduledGame
+	for _, sg := range m.scheduled {
+		if !sg.ScheduledAt.After(before) {
+			copied := *sg
+			due = append(due, &copied)
+		}
+	}
+	return due, nil
 }

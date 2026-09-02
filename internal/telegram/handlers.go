@@ -24,6 +24,7 @@ type Bot struct {
 	roleDelivery *roleDeliveryTracker
 	boards       *boardTracker
 	httpServer   *http.Server
+	scheduleStop context.CancelFunc
 }
 
 func NewBot(token string, st store.Store) (*Bot, error) {
@@ -44,6 +45,10 @@ func NewBot(token string, st store.Store) (*Bot, error) {
 	}
 
 	b.sender.OnDMFailure = b.handleDMFailure
+
+	scheduleCtx, scheduleStop := context.WithCancel(context.Background())
+	b.scheduleStop = scheduleStop
+	b.startScheduleWatcher(scheduleCtx)
 
 	go b.processOutbox()
 	b.recoverGames()
@@ -224,6 +229,9 @@ func (b *Bot) dispatchUpdate(update tgbotapi.Update) {
 // Stop drains running games before shutting the sender down, so a redeploy
 // leaves every game in a state that recovery can pick up.
 func (b *Bot) Stop() {
+	if b.scheduleStop != nil {
+		b.scheduleStop()
+	}
 	if b.httpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := b.httpServer.Shutdown(ctx); err != nil {
@@ -324,6 +332,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdHelp(msg)
 	case "guide":
 		b.cmdGuide(msg)
+	case "schedule":
+		b.cmdSchedule(msg)
 	case "start":
 		if msg.Chat.IsPrivate() {
 			b.handleDMStart(msg)
@@ -413,6 +423,8 @@ func (b *Bot) cmdStartGame(msg *tgbotapi.Message) {
 		b.sender.SendText(msg.Chat.ID, "A game is already in progress. Use /status to check.")
 		return
 	}
+
+	_ = b.store.DeleteScheduledGame(msg.Chat.ID)
 
 	cfg := b.newGameConfig(msg.Chat.ID)
 	hostID := engine.PlayerID(msg.From.ID)

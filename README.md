@@ -50,7 +50,7 @@ need no exports.
 4. Copy the connection string and set it as `MONGODB_URI`
 
 Collections and indexes are created automatically: `games`, `waitlists`,
-`dm_confirmed`, `cooldowns`, `player_stats`, `game_history`, `chat_settings`.
+`dm_confirmed`, `cooldowns`, `player_stats`, `game_history`, `chat_settings`, `scheduled_games`.
 
 `MONGODB_URI` is required to start the bot. The in-memory store implements the
 same interface and is used by the test suite, but it is not wired into `main`,
@@ -73,6 +73,7 @@ Full guide: [docs/DEPLOY_RENDER.md](docs/DEPLOY_RENDER.md)
 | Command | Context | Description |
 |---------|---------|-------------|
 | `/startgame` | Group | Open a lobby |
+| `/schedule [when\|cancel]` | Group | Auto-open a lobby at a future time |
 | `/join` / `/leave` | Group | Join or leave the lobby |
 | `/begin` | Group (host) | Start the game |
 | `/endgame` | Group (host/admin) | Force-end the game |
