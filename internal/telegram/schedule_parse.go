@@ -9,11 +9,16 @@ import (
 	"github.com/segni/mafia-bot/internal/store"
 )
 
-// parseScheduleTime converts user input into an absolute UTC time.
+// East Africa Time — UTC+3, no daylight saving.
+var scheduleZone = time.FixedZone("EAT", 3*60*60)
+
+const scheduleZoneLabel = "EAT (UTC+3)"
+
+// parseScheduleTime converts user input into an absolute time (stored as UTC).
 //
 // Supported forms:
 //   - in 30m, in 2h, in 1d, in 90m
-//   - at 20:00, at 08:30  (24-hour clock, UTC; next occurrence)
+//   - at 20:00, at 08:30  (24-hour clock in East Africa Time / UTC+3)
 func parseScheduleTime(args string, now time.Time) (time.Time, error) {
 	args = strings.TrimSpace(strings.ToLower(args))
 	if args == "" {
@@ -26,7 +31,7 @@ func parseScheduleTime(args string, now time.Time) (time.Time, error) {
 	if strings.HasPrefix(args, "at ") {
 		return parseScheduleAt(args[3:], now)
 	}
-	return time.Time{}, fmt.Errorf("use `in 30m`, `in 2h`, or `at 20:00` (UTC)")
+	return time.Time{}, fmt.Errorf("use `in 30m`, `in 2h`, or `at 20:00` (%s)", scheduleZoneLabel)
 }
 
 func parseScheduleIn(body string, now time.Time) (time.Time, error) {
@@ -91,8 +96,9 @@ func parseScheduleAt(body string, now time.Time) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("minute must be 0–59")
 	}
 
-	loc := time.UTC
-	candidate := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, loc)
+	loc := scheduleZone
+	localNow := now.In(scheduleZone)
+	candidate := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), hour, minute, 0, 0, loc)
 	if !candidate.After(now.Add(store.MinScheduleLead - time.Second)) {
 		candidate = candidate.Add(24 * time.Hour)
 	}
@@ -102,34 +108,49 @@ func parseScheduleAt(body string, now time.Time) (time.Time, error) {
 	return candidate, nil
 }
 
-func formatScheduleWhen(t time.Time, now time.Time) string {
-	if t.Sub(now) < 24*time.Hour {
-		return fmt.Sprintf("in %s", shortDuration(t.Sub(now)))
-	}
-	return t.UTC().Format("Mon Jan 2, 15:04 UTC")
+func formatScheduleInstant(t time.Time) string {
+	return t.In(scheduleZone).Format("Mon Jan 2, 15:04 ") + scheduleZoneLabel
 }
 
-func shortDuration(d time.Duration) string {
+// formatScheduleCountdown returns a compact remaining-time string, e.g. "2d 5h 12m".
+func formatScheduleCountdown(until, now time.Time) string {
+	d := until.Sub(now)
+	if d <= 0 {
+		return "starting now"
+	}
 	if d < time.Minute {
 		return "less than a minute"
 	}
-	if d < time.Hour {
-		m := int(d.Round(time.Minute) / time.Minute)
-		if m == 1 {
-			return "1 minute"
+
+	days := int(d / (24 * time.Hour))
+	d -= time.Duration(days) * 24 * time.Hour
+	hours := int(d / time.Hour)
+	d -= time.Duration(hours) * time.Hour
+	minutes := int(d / time.Minute)
+	d -= time.Duration(minutes) * time.Minute
+	seconds := int(d / time.Second)
+
+	var parts []string
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", days))
+	}
+	if hours > 0 {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+	}
+	if minutes > 0 {
+		parts = append(parts, fmt.Sprintf("%dm", minutes))
+	}
+	if len(parts) == 0 || d < 5*time.Minute {
+		if seconds > 0 {
+			parts = append(parts, fmt.Sprintf("%ds", seconds))
 		}
-		return fmt.Sprintf("%d minutes", m)
 	}
-	if d < 24*time.Hour {
-		h := int(d.Round(time.Hour) / time.Hour)
-		if h == 1 {
-			return "1 hour"
-		}
-		return fmt.Sprintf("%d hours", h)
+	if len(parts) == 0 {
+		return "less than a minute"
 	}
-	days := int(d.Round(24*time.Hour) / (24 * time.Hour))
-	if days == 1 {
-		return "1 day"
-	}
-	return fmt.Sprintf("%d days", days)
+	return strings.Join(parts, " ")
+}
+
+func formatScheduleWhen(t time.Time, now time.Time) string {
+	return formatScheduleCountdown(t, now)
 }

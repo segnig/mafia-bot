@@ -457,6 +457,9 @@ func (b *Bot) cmdJoin(msg *tgbotapi.Message) {
 	ga := b.supervisor.GetGame(gameIDForChat(msg.Chat.ID))
 
 	if ga == nil {
+		if b.signupForScheduledGame(msg) {
+			return
+		}
 		_ = b.store.AddToWaitlist(msg.Chat.ID, playerID)
 		b.sender.SendText(msg.Chat.ID, "No active game. You've been added to the waitlist for the next game.")
 		return
@@ -819,6 +822,12 @@ func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
 		return
 	case "react":
 		b.handleReactCallback(cq, parts)
+		return
+	case "schedjoin":
+		b.handleSchedJoinCallback(cq, parts)
+		return
+	case "schedinfo":
+		b.handleSchedInfoCallback(cq, parts)
 		return
 	}
 

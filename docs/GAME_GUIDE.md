@@ -111,14 +111,28 @@ Plan ahead so the group knows when the next lobby opens.
 ```
 /schedule in 2h
 /schedule in 45m
-/schedule at 20:00          ← 24-hour clock, UTC
+/schedule at 20:00          ← 24-hour clock, East Africa Time (UTC+3)
 ```
 
 **Check or cancel**
 ```
-/schedule                   ← show pending schedule
+/schedule                   ← show countdown and scheduled time
 /schedule cancel            ← host or admin only
 ```
+
+**Countdown**
+- `/schedule` always shows **⏳ Countdown** (e.g. `2d 5h 12m` or `3m 20s`)
+- The group gets automatic reminders at **1 hour**, **15 minutes**, and **5 minutes** before the lobby opens
+
+**Sign up before start time**
+- A **schedule card** appears with a **✅ Join** button (and `/join` works too)
+- The card shows the countdown, player list, and count — it updates live every 30 seconds
+- Tap **Join** to sign up; tap **🔄 Refresh** to update the countdown
+
+**When the lobby opens**
+- The scheduled host is already in the lobby
+- Signed-up players with DM `/start` done are auto-joined
+- Everyone else can `/join` freely — no invite needed
 
 **What happens at the scheduled time**
 - Bot posts **"Scheduled game time!"** in the group
@@ -136,10 +150,13 @@ Plan ahead so the group knows when the next lobby opens.
 **Example**
 ```
 Alice: /schedule in 2h
-Bot: 🗓️ Game scheduled for Wed Sep 2, 20:04 UTC (in 2 hours).
+Bot: 🗓️ Game scheduled for Wed Sep 2, 20:04 EAT (UTC+3)
+     ⏳ Countdown: 2h
      You'll host when the lobby opens…
 
-(two hours later)
+(1h, 15m, and 5m before — countdown reminders in the group)
+
+(at scheduled time)
 Bot: 🗓️ Scheduled game time!
      @alice is hosting. Tap Join Lobby or /join.
 ```
@@ -578,22 +595,24 @@ Bot: 🎭 Lobby card appears with Join Lobby, Configure buttons
 /schedule in 2h
 /schedule in 45m
 /schedule in 1d
-/schedule at 20:00              ← 24-hour UTC, next occurrence
-/schedule                         ← show pending schedule
+/schedule at 20:00              ← 24-hour East Africa Time (UTC+3), next occurrence
+/schedule                         ← show countdown + scheduled time
 /schedule cancel                  ← remove schedule (host or admin)
 ```
 
 **Examples**
 ```
 Alice: /schedule in 2h
-Bot: 🗓️ Game scheduled for Wed Sep 2, 20:04 UTC (in 2 hours).
+Bot: 🗓️ Game scheduled for Wed Sep 2, 20:04 EAT (UTC+3)
+     ⏳ Countdown: 2h
      You'll host when the lobby opens. Configure with /settings after it starts.
-     /schedule to check · /schedule cancel to remove
+     /schedule to check countdown · /schedule cancel to remove
 
 Alice: /schedule
 Bot: 🗓️ Scheduled game
      Host: @alice
-     When: Wed Sep 2, 20:04 UTC (in 1 hour 58 minutes)
+     When: Wed Sep 2, 20:04 EAT (UTC+3)
+     ⏳ Countdown: 1h 58m
 
 Alice: /schedule cancel
 Bot: 🗓️ Scheduled game cancelled.
@@ -613,7 +632,16 @@ Bot: 🗓️ Scheduled game time!
 | Relative minutes | `/schedule in 30m` | 30 minutes from now |
 | Relative hours | `/schedule in 2h` | 2 hours from now |
 | Relative days | `/schedule in 1d` | 1 day from now |
-| Absolute (UTC) | `/schedule at 20:00` | Next 20:00 UTC (today or tomorrow) |
+| Absolute (EAT) | `/schedule at 20:00` | Next 20:00 East Africa Time / UTC+3 (today or tomorrow) |
+
+**Countdown reminders**
+
+The bot posts in the group when the scheduled time is:
+- **1 hour** away
+- **15 minutes** away
+- **5 minutes** away
+
+Each reminder includes the host, the exact EAT time, and a note that the lobby opens automatically.
 
 **Limits**
 - At least **5 minutes** in the future
@@ -1741,7 +1769,7 @@ A: Only the **lobby host**, before `/begin`. Not admins, not other players.
 A: Host types `/set night 75` (etc.) in the lobby. See [Every setting](#every-setting) for keys and ranges.
 
 **Q: Can I schedule a game for later?**
-A: Yes — `/schedule in 2h` or `/schedule at 20:00` (UTC). The bot opens a lobby automatically at that time; you become host. Use `/schedule` to check or `/schedule cancel` to remove it.
+A: Yes — `/schedule in 2h` or `/schedule at 20:00` (East Africa Time, UTC+3). The bot opens a lobby automatically at that time; you become host. Use `/schedule` to check or `/schedule cancel` to remove it.
 
 **Q: Where is the full guide?**
 A: Type `/guide` in Telegram, or read this file on GitHub.

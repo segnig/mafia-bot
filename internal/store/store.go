@@ -52,6 +52,7 @@ type Store interface {
 	GetScheduledGame(chatID int64) (*ScheduledGame, error)
 	DeleteScheduledGame(chatID int64) error
 	ListDueScheduledGames(before time.Time) ([]*ScheduledGame, error)
+	ListUpcomingScheduledGames(after time.Time) ([]*ScheduledGame, error)
 }
 
 // ChatSettings is a group's saved game configuration. Preset names the base
@@ -417,4 +418,17 @@ func (m *MemoryStore) ListDueScheduledGames(before time.Time) ([]*ScheduledGame,
 		}
 	}
 	return due, nil
+}
+
+func (m *MemoryStore) ListUpcomingScheduledGames(after time.Time) ([]*ScheduledGame, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var upcoming []*ScheduledGame
+	for _, sg := range m.scheduled {
+		if sg.ScheduledAt.After(after) {
+			copied := *sg
+			upcoming = append(upcoming, &copied)
+		}
+	}
+	return upcoming, nil
 }

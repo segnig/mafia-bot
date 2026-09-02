@@ -147,7 +147,7 @@ func FormatHelpCommands() string {
 
 	msg += "*Setup & lobby*\n"
 	msg += "`/startgame` — open a lobby\n"
-	msg += "`/schedule in 2h` · `/schedule at 20:00` — auto-open a lobby later\n"
+	msg += "`/schedule in 2h` · `/schedule at 20:00` — auto-open a lobby later (EAT / UTC+3)\n"
 	msg += "`/join` · `/leave` — join or leave before start\n"
 	msg += "`/begin` — host starts (enough players + everyone DM'd `/start`)\n"
 	msg += "`/settings` — host configures rules in lobby\n"

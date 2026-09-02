@@ -152,3 +152,16 @@ func buildRematchButton(chatID int64) tgbotapi.InlineKeyboardMarkup {
 		),
 	)
 }
+
+// buildScheduleJoinKeyboard is the signup card shown while waiting for a
+// scheduled start time. Format: schedjoin:<chatID> · schedinfo:<chatID>
+func buildScheduleJoinKeyboard(chatID int64) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Join", fmt.Sprintf("schedjoin:%d", chatID)),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Refresh", fmt.Sprintf("schedinfo:%d", chatID)),
+		),
+	)
+}
