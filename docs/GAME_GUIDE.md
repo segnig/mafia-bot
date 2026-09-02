@@ -112,7 +112,7 @@ Two games with the same players can have completely different compositions. The 
 | `/status` | Anyone | Current phase, timer, alive and dead counts |
 | `/graveyard` | Anyone | The dead, in the order they died |
 | `/roles` | Anyone | Full role reference |
-| `/settings` | Host/Admin | Open the settings panel |
+| `/settings` | Host/Admin (lobby only) | Configure rules before /begin |
 | `/accuse @player` | Alive & reachable | Publicly accuse someone (or reply to their message) |
 | `/defend [text]` | Alive & reachable | Your defence statement (once per day) |
 | `/whisper @player [msg]` | Alive & reachable | Private message — or reply to them; the group sees that it happened |
@@ -230,7 +230,13 @@ A game **cancelled by the host counts as neither a win nor a loss**, and leaves 
 
 ## Game Modes & Settings
 
-`/settings` opens an inline panel for group admins and the current host. Start from a preset, then tap any individual option. Everything is saved per group and applies to the next game.
+When someone runs `/startgame`, a **lobby** opens. The host or a group admin configures the rules **there**, before `/begin`:
+
+1. Tap **⚙️ Configure** on the lobby card, or type `/settings`
+2. Pick a preset, then tap individual options
+3. Tap **✅ Done** — settings are locked once the host runs `/begin`
+
+Settings are saved for the group, so the next `/startgame` starts from the same rules unless you change them again in the lobby.
 
 | Preset | What it's for |
 |--------|---------------|

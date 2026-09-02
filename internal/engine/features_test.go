@@ -874,6 +874,43 @@ func TestSettingsApplyOnTopOfEveryPreset(t *testing.T) {
 	}
 }
 
+func TestLobbyConfigOnlyWhileOpen(t *testing.T) {
+	gs := NewGameState("g1", -100, 1, DefaultConfig())
+	gs.Config.MinPlayers = 1
+	gs, _ = Reduce(gs, GameCreatedEvent{})
+
+	gs, effects := Reduce(gs, ConfigPresetEvent{PlayerID: 1, Preset: PresetChaos})
+	if gs.Config.PresetName != PresetChaos {
+		t.Fatalf("preset = %q, want %q", gs.Config.PresetName, PresetChaos)
+	}
+	if len(effects) == 0 {
+		t.Fatal("expected lobby refresh effects")
+	}
+
+	beforeLovers := gs.Config.EnableLovers
+	gs, effects = Reduce(gs, ConfigSettingEvent{PlayerID: 2, Key: "lovers"})
+	if gs.Config.EnableLovers != beforeLovers {
+		t.Fatal("non-host should not change lobby config")
+	}
+	if len(effects) != 0 {
+		t.Fatal("unauthorized config change should emit nothing")
+	}
+
+	gs, _ = Reduce(gs, BeginEvent{PlayerID: 1})
+	if gs.Phase == PhaseLobby {
+		// Begin needs a full roster to deal roles; for the lock test, move past
+		// the lobby explicitly once lobby-only behaviour has been exercised.
+		gs.Phase = PhaseRoleAssign
+	}
+	gs, effects = Reduce(gs, ConfigPresetEvent{PlayerID: 1, Preset: PresetSpeed})
+	if gs.Config.PresetName != PresetChaos {
+		t.Fatalf("config after begin = %q, want locked %q", gs.Config.PresetName, PresetChaos)
+	}
+	if len(effects) != 0 {
+		t.Fatal("config changes after begin should be ignored")
+	}
+}
+
 func TestValidateConfigRejectsBrokenCombinations(t *testing.T) {
 	tests := []struct {
 		name   string

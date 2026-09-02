@@ -207,14 +207,47 @@ func containsString(list []string, value string) bool {
 	return false
 }
 
-// FormatSettingsPanel is the text of the /settings message.
+// ApplyPreset replaces cfg with a named preset's defaults.
+func ApplyPreset(cfg *GameConfig, preset string) {
+	*cfg = PresetConfig(preset)
+}
+
+// CycleSetting advances one registry setting on cfg. Returns false for an
+// unknown key.
+func CycleSetting(cfg *GameConfig, key string) bool {
+	s, ok := SettingByKey(key)
+	if !ok {
+		return false
+	}
+	s.Set(cfg, s.Next(*cfg))
+	return true
+}
+
+// CanEditLobbyConfig reports whether a user may change lobby settings.
+func CanEditLobbyConfig(hostID, playerID PlayerID, isAdmin bool) bool {
+	return isAdmin || hostID == playerID
+}
+
+// FormatSettingsPanel is the read-only rules summary shown to players.
 func FormatSettingsPanel(cfg GameConfig) string {
 	label, pitch := PresetLabel(cfg.PresetName)
-	msg := "⚙️ *Game Settings*\n" + divider + "\n"
+	msg := "⚙️ *Game Rules*\n" + divider + "\n"
 	msg += fmt.Sprintf("Preset: *%s*\n_%s_\n\n", EscapeMD(label), EscapeMD(pitch))
 	msg += fmt.Sprintf("🌙 Night %ds  ·  💬 Day %ds  ·  🗳️ Vote %ds\n",
 		cfg.NightTimeoutSec, cfg.DiscussionTimeoutSec, cfg.VotingTimeoutSec)
 	msg += divider + "\n"
-	msg += "_Tap a button to change it. Settings apply to the next game you start._"
+	msg += "_The host configures these in the lobby before /begin._"
+	return msg
+}
+
+// FormatLobbySettingsPanel is the editable settings message for the host.
+func FormatLobbySettingsPanel(cfg GameConfig) string {
+	label, pitch := PresetLabel(cfg.PresetName)
+	msg := "⚙️ *Configure This Game*\n" + divider + "\n"
+	msg += fmt.Sprintf("Preset: *%s*\n_%s_\n\n", EscapeMD(label), EscapeMD(pitch))
+	msg += fmt.Sprintf("🌙 Night %ds  ·  💬 Day %ds  ·  🗳️ Vote %ds\n",
+		cfg.NightTimeoutSec, cfg.DiscussionTimeoutSec, cfg.VotingTimeoutSec)
+	msg += divider + "\n"
+	msg += "_Tap to change. Locked when the host runs /begin._"
 	return msg
 }

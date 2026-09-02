@@ -21,6 +21,10 @@ func Reduce(gs *GameState, ev Event) (*GameState, []SideEffect) {
 		return reduceLeave(gs, e)
 	case BeginEvent:
 		return reduceBegin(gs, e)
+	case ConfigPresetEvent:
+		return reduceConfigPreset(gs, e)
+	case ConfigSettingEvent:
+		return reduceConfigSetting(gs, e)
 	case EndGameEvent:
 		return reduceEndGame(gs, e)
 	case RolesDeliveredEvent:
@@ -303,6 +307,48 @@ func reassignHost(gs *GameState) PlayerID {
 	return 0
 }
 
+func reduceConfigPreset(gs *GameState, e ConfigPresetEvent) (*GameState, []SideEffect) {
+	if gs.Phase != PhaseLobby {
+		return gs, nil
+	}
+	if !CanEditLobbyConfig(gs.HostID, e.PlayerID, e.IsAdmin) {
+		return gs, nil
+	}
+	cfg := PresetConfig(e.Preset)
+	if err := ValidateConfig(cfg); err != nil {
+		return gs, nil
+	}
+	gs.Config = cfg
+	gs.AppendLog("config_preset", map[string]interface{}{"preset": e.Preset, "by": e.PlayerID})
+	return gs, lobbyConfigEffects(gs)
+}
+
+func reduceConfigSetting(gs *GameState, e ConfigSettingEvent) (*GameState, []SideEffect) {
+	if gs.Phase != PhaseLobby {
+		return gs, nil
+	}
+	if !CanEditLobbyConfig(gs.HostID, e.PlayerID, e.IsAdmin) {
+		return gs, nil
+	}
+	cfg := gs.Config
+	if !CycleSetting(&cfg, e.Key) {
+		return gs, nil
+	}
+	if err := ValidateConfig(cfg); err != nil {
+		return gs, nil
+	}
+	gs.Config = cfg
+	gs.AppendLog("config_setting", map[string]interface{}{"key": e.Key, "by": e.PlayerID})
+	return gs, lobbyConfigEffects(gs)
+}
+
+func lobbyConfigEffects(gs *GameState) []SideEffect {
+	return []SideEffect{
+		lobbyStatusEffect(gs),
+		LobbyConfigUpdatedEffect{ChatID: gs.ChatID, Config: gs.Config},
+	}
+}
+
 func reduceBegin(gs *GameState, e BeginEvent) (*GameState, []SideEffect) {
 	if gs.Phase != PhaseLobby {
 		return gs, []SideEffect{
@@ -400,6 +446,7 @@ func reduceBegin(gs *GameState, e BeginEvent) (*GameState, []SideEffect) {
 	// case the acknowledgement never comes back.
 	effects = append(effects, RolesDeliveredEffect{GameID: gs.ID, Deal: gs.DealNumber})
 	effects = append(effects, armPhase(gs, PhaseRoleAssign)...)
+	effects = append(effects, LobbyConfigUpdatedEffect{ChatID: gs.ChatID, Config: gs.Config})
 
 	return gs, effects
 }

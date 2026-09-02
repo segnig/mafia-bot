@@ -334,7 +334,7 @@ const helpText = `🎭 *Mafia Bot*
 /join — join the lobby
 /leave — leave the lobby
 /begin — host starts the game
-/settings — host or admin configures the ruleset
+/settings — host or admin configures rules in the lobby (before /begin)
 
 *During the day*
 /accuse @player — publicly accuse someone
@@ -835,8 +835,8 @@ func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
 	// The settings and reaction handlers answer the callback themselves, so
 	// they can attach a toast explaining what happened.
 	switch parts[0] {
-	case "cfg":
-		b.handleSettingsCallback(cq, parts)
+	case "lobbycfg":
+		b.handleLobbyConfigCallback(cq, parts)
 		return
 	case "react":
 		b.handleReactCallback(cq, parts)
@@ -907,6 +907,8 @@ func (b *Bot) handleInfoCallback(cq *tgbotapi.CallbackQuery, parts []string) {
 	case "status":
 		b.sender.SendText(state.ChatID, b.renderStatus(state))
 	case "settings":
+		b.sender.SendText(state.ChatID, engine.FormatSettingsPanel(state.Config))
+	case "rules":
 		b.sender.SendText(state.ChatID, engine.FormatSettingsPanel(state.Config))
 	}
 }
@@ -1063,6 +1065,24 @@ func (b *Bot) handleLobbyCallback(cq *tgbotapi.CallbackQuery, parts []string) {
 }
 
 func (b *Bot) sendLobbyCard(state *engine.GameState) {
+	b.postLobbyCard(state)
+}
+
+func (b *Bot) postLobbyCard(state *engine.GameState) {
+	text := formatLobbyCardText(state)
+	keyboard := buildJoinButton(state.ID)
+	gameID := state.ID
+
+	if messageID, ok := b.boards.getLobby(gameID); ok {
+		b.sender.EditKeyboardMessage(state.ChatID, messageID, text, keyboard)
+		return
+	}
+	b.sender.SendTrackedKeyboard(state.ChatID, text, keyboard, func(id int) {
+		b.boards.setLobby(gameID, id)
+	})
+}
+
+func formatLobbyCardText(state *engine.GameState) string {
 	ordered := sortedPlayers(state)
 	names := make([]string, 0, len(ordered))
 	for _, p := range ordered {
@@ -1072,27 +1092,25 @@ func (b *Bot) sendLobbyCard(state *engine.GameState) {
 	if host, ok := state.Players[state.HostID]; ok {
 		hostName = host.PlainName()
 	}
-	b.renderLobbyCard(state.ChatID, state.ID, hostName, names,
-		state.Config.MinPlayers, state.Config.MaxPlayers, state.Config.PresetName)
-}
 
-func (b *Bot) renderLobbyCard(chatID int64, gameID engine.GameID, hostName string, players []string, minPlayers, maxPlayers int, preset string) {
 	playerList := ""
-	for i, name := range players {
+	for i, name := range names {
 		playerList += fmt.Sprintf("%d. %s\n", i+1, engine.EscapeMD(name))
 	}
 	if playerList == "" {
 		playerList = "_nobody yet_\n"
 	}
 
-	readyStatus := fmt.Sprintf("❌ Need %d more player(s)", minPlayers-len(players))
-	if len(players) >= minPlayers {
+	minPlayers := state.Config.MinPlayers
+	maxPlayers := state.Config.MaxPlayers
+	readyStatus := fmt.Sprintf("❌ Need %d more player(s)", minPlayers-len(names))
+	if len(names) >= minPlayers {
 		readyStatus = "✅ Ready to start! Host: use /begin"
 	}
 
-	presetLabel, presetPitch := engine.PresetLabel(preset)
+	presetLabel, presetPitch := engine.PresetLabel(state.Config.PresetName)
 
-	text := fmt.Sprintf(
+	return fmt.Sprintf(
 		"🎮 *MAFIA — Game Lobby*\n"+
 			"━━━━━━━━━━━━━━━━━━━━\n"+
 			"👑 Host: %s\n"+
@@ -1102,14 +1120,47 @@ func (b *Bot) renderLobbyCard(chatID int64, gameID engine.GameID, hostName strin
 			"\n%s\n"+
 			"━━━━━━━━━━━━━━━━━━━━\n"+
 			"%s\n"+
-			"\n_Tap Join below. First time? DM me /start so I can send your role._",
-		engine.EscapeMD(hostName), len(players), maxPlayers,
-		engine.ProgressBar(len(players), maxPlayers, 10),
+			"\n_Tap Join below. Host: tap ⚙️ Configure or /settings before /begin._",
+		engine.EscapeMD(hostName), len(names), maxPlayers,
+		engine.ProgressBar(len(names), maxPlayers, 10),
 		engine.EscapeMD(presetLabel), engine.EscapeMD(presetPitch),
 		playerList, readyStatus,
 	)
+}
 
-	b.sender.SendTextWithKeyboard(chatID, text, buildJoinButton(gameID))
+func (b *Bot) renderLobbyCard(chatID int64, gameID engine.GameID, hostName string, players []string, minPlayers, maxPlayers int, preset string) {
+	if ga := b.supervisor.GetGame(gameID); ga != nil && ga.Phase() == engine.PhaseLobby {
+		b.postLobbyCard(ga.State())
+		return
+	}
+	state := b.lobbyStateFromEffect(chatID, gameID, hostName, players, minPlayers, maxPlayers, preset)
+	b.postLobbyCard(state)
+}
+
+func (b *Bot) lobbyStateFromEffect(chatID int64, gameID engine.GameID, hostName string, players []string, minPlayers, maxPlayers int, preset string) *engine.GameState {
+	state := &engine.GameState{
+		ID:       gameID,
+		ChatID:   chatID,
+		Players:  make(map[engine.PlayerID]*engine.Player),
+		Config:   engine.PresetConfig(preset),
+		HostID:   1,
+	}
+	state.Config.MinPlayers = minPlayers
+	state.Config.MaxPlayers = maxPlayers
+	now := time.Now()
+	for i, name := range players {
+		pid := engine.PlayerID(i + 1)
+		state.Players[pid] = &engine.Player{
+			ID:          pid,
+			DisplayName: name,
+			Alive:       true,
+			JoinedAt:    now.Add(time.Duration(i) * time.Millisecond),
+		}
+		if name == hostName || (i == 0 && hostName != "") {
+			state.HostID = pid
+		}
+	}
+	return state
 }
 
 func (b *Bot) trackDiscussionActivity(msg *tgbotapi.Message) {
@@ -1250,6 +1301,9 @@ func (b *Bot) dispatchEffect(eff engine.SideEffect) {
 
 	case engine.SendLobbyStatusEffect:
 		b.renderLobbyCard(e.ChatID, e.GameID, e.HostName, e.Players, e.MinPlayers, e.MaxPlayers, e.Preset)
+
+	case engine.LobbyConfigUpdatedEffect:
+		b.persistLobbyConfig(e.ChatID, e.Config)
 
 	case engine.GameOverEffect:
 		// The actor deletes the stored game once its final write has landed;

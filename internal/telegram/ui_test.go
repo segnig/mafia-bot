@@ -42,23 +42,22 @@ func TestBoardTrackerKeepsGamesAndChatsSeparate(t *testing.T) {
 	tracker := newBoardTracker()
 	tracker.setVote("g1", 1)
 	tracker.setVote("g2", 2)
-	tracker.setSettings(-100, 10)
-	tracker.setSettings(-200, 20)
+	tracker.setLobby("g1", 10)
+	tracker.setLobbySettings("g2", 20)
 
 	tracker.forget("g1")
-	tracker.clearSettings(-100)
 
 	if _, ok := tracker.getVote("g1"); ok {
 		t.Error("the finished game should be forgotten")
 	}
+	if _, ok := tracker.getLobby("g1"); ok {
+		t.Error("the finished game's lobby card should be forgotten")
+	}
 	if id, ok := tracker.getVote("g2"); !ok || id != 2 {
 		t.Error("another game's board was dropped")
 	}
-	if _, ok := tracker.getSettings(-100); ok {
-		t.Error("the closed panel should be forgotten")
-	}
-	if id, ok := tracker.getSettings(-200); !ok || id != 20 {
-		t.Error("another chat's panel was dropped")
+	if id, ok := tracker.getLobbySettings("g2"); !ok || id != 20 {
+		t.Error("another game's settings panel was dropped")
 	}
 }
 
@@ -75,11 +74,11 @@ func TestBoardTrackerIsSafeForConcurrentUse(t *testing.T) {
 			id := engine.GameID(fmt.Sprintf("g%d", i%5))
 			tracker.setVote(id, i)
 			tracker.getVote(id)
-			tracker.setSettings(int64(i%5), i)
-			tracker.getSettings(int64(i % 5))
+			tracker.setLobbySettings(id, i)
+			tracker.getLobbySettings(id)
 			if i%7 == 0 {
 				tracker.forget(id)
-				tracker.clearSettings(int64(i % 5))
+				tracker.clearLobbySettings(id)
 			}
 		}(i)
 	}
@@ -130,7 +129,7 @@ func TestEveryCallbackFitsTelegramsLimit(t *testing.T) {
 		"join":     buildJoinButton(gameID),
 		"reaction": buildReactionBar(gameID),
 		"rematch":  buildRematchButton(-1001234567890),
-		"settings": buildSettingsKeyboard(-1001234567890, engine.DefaultConfig()),
+		"settings": buildLobbySettingsKeyboard("chat-100", engine.DefaultConfig()),
 	}
 
 	for name, markup := range keyboards {
@@ -156,7 +155,7 @@ func TestEveryKeyboardPrefixIsRouted(t *testing.T) {
 	routed := map[string]bool{
 		"night": true, "vote": true, "join": true, "lobby": true,
 		"info": true, "rematch": true, "board": true, "recap": true,
-		"cfg": true, "react": true,
+		"react": true, "lobbycfg": true,
 	}
 
 	players := map[engine.PlayerID]*engine.Player{1: {ID: 1, Username: "ann", Alive: true}}
@@ -166,7 +165,7 @@ func TestEveryKeyboardPrefixIsRouted(t *testing.T) {
 		buildJoinButton("g1"),
 		buildReactionBar("g1"),
 		buildRematchButton(-100),
-		buildSettingsKeyboard(-100, engine.DefaultConfig()),
+		buildLobbySettingsKeyboard("g1", engine.DefaultConfig()),
 	}
 
 	for _, markup := range all {
@@ -231,7 +230,7 @@ func TestKeyboardsSkipUnknownTargets(t *testing.T) {
 func TestSettingsPanelCoversEverySettingAndPreset(t *testing.T) {
 	cfg := engine.PresetConfig(engine.PresetChaos)
 
-	markup := buildSettingsKeyboard(-100, cfg)
+	markup := buildLobbySettingsKeyboard("chat-100", cfg)
 	data := strings.Join(callbackData(markup), "|")
 	labels := strings.Join(buttonLabels(markup), "|")
 
@@ -263,7 +262,7 @@ func TestSettingsPanelCoversEverySettingAndPreset(t *testing.T) {
 func TestSettingsPanelRendersEveryValue(t *testing.T) {
 	for _, name := range engine.PresetNames() {
 		cfg := engine.PresetConfig(name)
-		for _, label := range buttonLabels(buildSettingsKeyboard(-100, cfg)) {
+		for _, label := range buttonLabels(buildLobbySettingsKeyboard("chat-100", cfg)) {
 			if strings.HasSuffix(label, "— ") {
 				t.Errorf("preset %q left a settings button with no value: %q", name, label)
 			}

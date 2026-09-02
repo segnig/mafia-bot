@@ -3,11 +3,12 @@ package telegram
 import (
 	"fmt"
 	"log"
-	"strconv"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/segni/mafia-bot/internal/actor"
 	"github.com/segni/mafia-bot/internal/engine"
 	"github.com/segni/mafia-bot/internal/stats"
+	"github.com/segni/mafia-bot/internal/store"
 )
 
 // leaderboardSize is how many players a leaderboard shows.
@@ -113,129 +114,145 @@ func (b *Bot) mentionedPlayer(msg *tgbotapi.Message) engine.PlayerID {
 }
 
 // ---------------------------------------------------------------------------
-// Settings panel
+// Lobby settings (configured during game creation)
 // ---------------------------------------------------------------------------
 
-// cmdSettings opens the configuration panel. Only a group admin or the current
-// host may change the ruleset, so one player cannot rewrite the game on
-// everyone else.
+// cmdSettings opens the lobby configuration panel while a lobby is open.
 func (b *Bot) cmdSettings(msg *tgbotapi.Message) {
 	if msg.Chat.IsPrivate() {
-		b.sender.SendDM(msg.Chat.ID, "Game settings belong to a group. Run /settings there.")
-		return
-	}
-	if !b.mayEditSettings(msg.Chat.ID, msg.From.ID) {
-		b.sender.SendText(msg.Chat.ID, "Only the host or a group admin can change the settings.")
+		b.sender.SendDM(msg.Chat.ID, "Configure the game in your group lobby with /settings or tap ⚙️ Configure on the lobby card.")
 		return
 	}
 
-	cfg := b.newGameConfig(msg.Chat.ID)
-	chatID := msg.Chat.ID
-	b.sender.SendTrackedKeyboard(
-		chatID,
-		engine.FormatSettingsPanel(cfg),
-		buildSettingsKeyboard(chatID, cfg),
-		func(messageID int) { b.boards.setSettings(chatID, messageID) },
-	)
+	ga := b.supervisor.GetGame(gameIDForChat(msg.Chat.ID))
+	if ga == nil {
+		b.sender.SendText(msg.Chat.ID, "No lobby is open. Run /startgame first, then configure the rules before /begin.")
+		return
+	}
+	if ga.Phase() != engine.PhaseLobby {
+		b.sender.SendText(msg.Chat.ID, "Settings are locked once the game starts. Change them in the lobby before /begin.")
+		return
+	}
+	if !b.mayEditLobbyConfig(ga, msg.From.ID) {
+		b.sender.SendText(msg.Chat.ID, "Only the host or a group admin can configure this game.")
+		return
+	}
+	b.openLobbySettingsPanel(ga.State())
 }
 
-// mayEditSettings allows group admins always, and the host of the game
-// currently running in that chat.
-func (b *Bot) mayEditSettings(chatID int64, userID int64) bool {
-	if b.isGroupAdmin(chatID, userID) {
+func (b *Bot) mayEditLobbyConfig(ga *actor.GameActor, userID int64) bool {
+	if b.isGroupAdmin(ga.ChatID(), userID) {
 		return true
-	}
-	ga := b.supervisor.GetGame(gameIDForChat(chatID))
-	if ga == nil {
-		// With no game running there is no host, so the only authority is
-		// the group's own admin list.
-		return false
 	}
 	return ga.State().HostID == engine.PlayerID(userID)
 }
 
-// handleSettingsCallback applies one tap on the settings panel.
-// Format: cfg:<chatID>:<action>:<value>
-func (b *Bot) handleSettingsCallback(cq *tgbotapi.CallbackQuery, parts []string) {
-	if len(parts) < 4 {
+func (b *Bot) openLobbySettingsPanel(state *engine.GameState) {
+	gameID := state.ID
+	b.sender.SendTrackedKeyboard(
+		state.ChatID,
+		engine.FormatLobbySettingsPanel(state.Config),
+		buildLobbySettingsKeyboard(gameID, state.Config),
+		func(messageID int) { b.boards.setLobbySettings(gameID, messageID) },
+	)
+}
+
+func (b *Bot) persistLobbyConfig(chatID int64, cfg engine.GameConfig) {
+	if err := b.store.SaveChatSettings(store.FromConfig(chatID, cfg)); err != nil {
+		log.Printf("settings: save failed for chat %d: %v", chatID, err)
+	}
+}
+
+// handleLobbyConfigCallback applies one tap on the lobby settings panel.
+// Format: lobbycfg:<gameID>:<action>:<value>
+func (b *Bot) handleLobbyConfigCallback(cq *tgbotapi.CallbackQuery, parts []string) {
+	if len(parts) < 3 {
 		return
 	}
-	chatID, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
+	gameID := engine.GameID(parts[1])
+	ga := b.supervisor.GetGame(gameID)
+	if ga == nil {
+		b.answerCallback(cq, "That lobby is gone.")
 		return
 	}
-	if !b.mayEditSettings(chatID, cq.From.ID) {
+	state := ga.State()
+	if state.Phase != engine.PhaseLobby {
+		b.answerCallback(cq, "Settings are locked — the game already started.")
+		return
+	}
+
+	action := parts[2]
+	if action == "open" {
+		if !b.mayEditLobbyConfig(ga, cq.From.ID) {
+			b.answerCallback(cq, "")
+			b.sender.SendText(state.ChatID, engine.FormatSettingsPanel(state.Config))
+			return
+		}
+		b.answerCallback(cq, "")
+		b.openLobbySettingsPanel(state)
+		return
+	}
+
+	if !b.mayEditLobbyConfig(ga, cq.From.ID) {
 		b.answerCallback(cq, "Only the host or a group admin can change settings.")
 		return
 	}
 
-	settings, err := b.store.LoadChatSettings(chatID)
-	if err != nil {
-		log.Printf("settings: load failed for chat %d: %v", chatID, err)
-		b.answerCallback(cq, "Couldn't load the settings.")
-		return
-	}
-	if settings.Overrides == nil {
-		settings.Overrides = make(map[string]string)
-	}
+	playerID := engine.PlayerID(cq.From.ID)
+	isAdmin := b.isGroupAdmin(state.ChatID, cq.From.ID)
 
-	action, value := parts[2], parts[3]
 	switch action {
-	case "preset":
-		// A preset is a fresh starting point, so the overrides layered on the
-		// previous one no longer apply.
-		settings.Preset = value
-		settings.Overrides = make(map[string]string)
+	case "close":
+		b.boards.clearLobbySettings(gameID)
+		b.answerCallback(cq, "Settings saved.")
+		label, _ := engine.PresetLabel(state.Config.PresetName)
+		text := fmt.Sprintf("⚙️ *Settings saved* — *%s*.\n\nRun /begin when everyone has joined.",
+			engine.EscapeMD(label))
+		if cq.Message != nil {
+			b.sender.EditKeyboardMessage(state.ChatID, cq.Message.MessageID, text, tgbotapi.NewInlineKeyboardMarkup())
+		}
+		return
 
-	case "set":
-		setting, ok := engine.SettingByKey(value)
-		if !ok {
+	case "preset":
+		if len(parts) < 4 {
 			return
 		}
-		cfg := settings.Config()
-		settings.Overrides[value] = setting.Next(cfg)
+		cfg := engine.PresetConfig(parts[3])
+		if err := engine.ValidateConfig(cfg); err != nil {
+			b.answerCallback(cq, "That preset wouldn't make a playable game.")
+			return
+		}
+		ga.Send(engine.ConfigPresetEvent{PlayerID: playerID, IsAdmin: isAdmin, Preset: parts[3]})
+		b.answerCallback(cq, "")
+		b.editLobbySettingsPanelConfig(cq, state.ChatID, gameID, cfg)
 
-	case "close":
-		b.boards.clearSettings(chatID)
-		b.answerCallback(cq, "Settings saved.")
-		b.editSettingsPanel(cq, chatID, settings, true)
-		return
+	case "set":
+		if len(parts) < 4 {
+			return
+		}
+		cfg := state.Config
+		if !engine.CycleSetting(&cfg, parts[3]) {
+			return
+		}
+		if err := engine.ValidateConfig(cfg); err != nil {
+			b.answerCallback(cq, "That combination wouldn't make a playable game.")
+			return
+		}
+		ga.Send(engine.ConfigSettingEvent{PlayerID: playerID, IsAdmin: isAdmin, Key: parts[3]})
+		b.answerCallback(cq, "")
+		b.editLobbySettingsPanelConfig(cq, state.ChatID, gameID, cfg)
 
 	default:
 		return
 	}
-
-	// A combination that cannot produce a playable game is rejected rather
-	// than saved, so /startgame can always trust what it reads back.
-	if err := engine.ValidateConfig(settings.Config()); err != nil {
-		b.answerCallback(cq, "That combination wouldn't make a playable game.")
-		return
-	}
-	if err := b.store.SaveChatSettings(settings); err != nil {
-		log.Printf("settings: save failed for chat %d: %v", chatID, err)
-		b.answerCallback(cq, "Couldn't save that.")
-		return
-	}
-
-	b.answerCallback(cq, "")
-	b.editSettingsPanel(cq, chatID, settings, false)
 }
 
-func (b *Bot) editSettingsPanel(cq *tgbotapi.CallbackQuery, chatID int64, settings settingsSource, closed bool) {
-	cfg := settings.Config()
-	text := engine.FormatSettingsPanel(cfg)
-	if closed {
-		label, _ := engine.PresetLabel(cfg.PresetName)
-		text = fmt.Sprintf("⚙️ *Settings saved* — preset *%s*.\n\nThese apply to the next game. Run /settings to change them again.",
-			engine.EscapeMD(label))
-		if cq.Message != nil {
-			b.sender.EditKeyboardMessage(chatID, cq.Message.MessageID, text, tgbotapi.NewInlineKeyboardMarkup())
-		}
-		return
-	}
+func (b *Bot) editLobbySettingsPanelConfig(cq *tgbotapi.CallbackQuery, chatID int64, gameID engine.GameID, cfg engine.GameConfig) {
+	text := engine.FormatLobbySettingsPanel(cfg)
+	keyboard := buildLobbySettingsKeyboard(gameID, cfg)
 
 	messageID := 0
-	if tracked, ok := b.boards.getSettings(chatID); ok {
+	if tracked, ok := b.boards.getLobbySettings(gameID); ok {
 		messageID = tracked
 	} else if cq.Message != nil {
 		messageID = cq.Message.MessageID
@@ -243,13 +260,7 @@ func (b *Bot) editSettingsPanel(cq *tgbotapi.CallbackQuery, chatID int64, settin
 	if messageID == 0 {
 		return
 	}
-	b.sender.EditKeyboardMessage(chatID, messageID, text, buildSettingsKeyboard(chatID, cfg))
-}
-
-// settingsSource is the small part of store.ChatSettings this file needs,
-// which keeps the signature above readable.
-type settingsSource interface {
-	Config() engine.GameConfig
+	b.sender.EditKeyboardMessage(chatID, messageID, text, keyboard)
 }
 
 // answerCallback acknowledges a tap, optionally with a toast. Every callback

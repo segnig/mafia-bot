@@ -41,6 +41,25 @@ type BeginEvent struct {
 
 func (BeginEvent) eventTag() {}
 
+// ConfigPresetEvent switches the lobby to a named preset. Only valid while the
+// game is still in the lobby, before /begin locks the ruleset.
+type ConfigPresetEvent struct {
+	PlayerID PlayerID
+	IsAdmin  bool
+	Preset   string
+}
+
+func (ConfigPresetEvent) eventTag() {}
+
+// ConfigSettingEvent cycles one tweakable setting in the lobby config.
+type ConfigSettingEvent struct {
+	PlayerID PlayerID
+	IsAdmin  bool
+	Key      string
+}
+
+func (ConfigSettingEvent) eventTag() {}
+
 type EndGameEvent struct {
 	PlayerID PlayerID
 	IsAdmin  bool
@@ -341,3 +360,12 @@ type SendLobbyStatusEffect struct {
 }
 
 func (SendLobbyStatusEffect) effectTag() {}
+
+// LobbyConfigUpdatedEffect tells the transport to persist the lobby config as
+// this group's default for the next /startgame or rematch.
+type LobbyConfigUpdatedEffect struct {
+	ChatID int64
+	Config GameConfig
+}
+
+func (LobbyConfigUpdatedEffect) effectTag() {}

@@ -85,6 +85,25 @@ func (s *ChatSettings) Config() engine.GameConfig {
 	return cfg
 }
 
+// FromConfig builds stored chat settings from a resolved game config, keeping
+// only the overrides that differ from the named preset's defaults.
+func FromConfig(chatID int64, cfg engine.GameConfig) *ChatSettings {
+	s := NewChatSettings(chatID)
+	s.Preset = cfg.PresetName
+	if s.Preset == "" {
+		s.Preset = engine.PresetClassic
+	}
+	base := engine.PresetConfig(s.Preset)
+	for _, setting := range engine.Settings() {
+		cur := setting.Get(cfg)
+		if cur != setting.Get(base) {
+			s.Overrides[setting.Key] = cur
+		}
+	}
+	s.UpdatedAt = time.Now()
+	return s
+}
+
 // joinCooldownTTL matches the TTL index used by the Mongo store.
 const joinCooldownTTL = 30 * time.Second
 

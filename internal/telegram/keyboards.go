@@ -82,9 +82,45 @@ func buildJoinButton(gameID engine.GameID) tgbotapi.InlineKeyboardMarkup {
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🎭 Roles", fmt.Sprintf("info:%s:roles", gameID)),
-			tgbotapi.NewInlineKeyboardButtonData("⚙️ Settings", fmt.Sprintf("info:%s:settings", gameID)),
+			tgbotapi.NewInlineKeyboardButtonData("⚙️ Configure", fmt.Sprintf("lobbycfg:%s:open", gameID)),
 		),
 	)
+}
+
+// buildLobbySettingsKeyboard renders the editable lobby settings panel.
+// Format: lobbycfg:<gameID>:<action>:<value>
+func buildLobbySettingsKeyboard(gameID engine.GameID, cfg engine.GameConfig) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	var presetRow []tgbotapi.InlineKeyboardButton
+	for _, name := range engine.PresetNames() {
+		label, _ := engine.PresetLabel(name)
+		if name == cfg.PresetName {
+			label = "▸ " + label
+		}
+		presetRow = append(presetRow, tgbotapi.NewInlineKeyboardButtonData(
+			label, fmt.Sprintf("lobbycfg:%s:preset:%s", gameID, name)))
+		if len(presetRow) == 2 {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(presetRow...))
+			presetRow = nil
+		}
+	}
+	if len(presetRow) > 0 {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(presetRow...))
+	}
+
+	for _, s := range engine.Settings() {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("%s — %s", s.Label, s.Display(cfg)),
+				fmt.Sprintf("lobbycfg:%s:set:%s", gameID, s.Key)),
+		))
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("✅ Done", fmt.Sprintf("lobbycfg:%s:close:x", gameID)),
+	))
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
 // buildReactionBar is the day's one-tap mood bar.
@@ -115,40 +151,4 @@ func buildRematchButton(chatID int64) tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("📜 Recap", fmt.Sprintf("recap:%d", chatID)),
 		),
 	)
-}
-
-// buildSettingsKeyboard renders the settings panel: presets on top, then one
-// button per toggle showing its current value.
-func buildSettingsKeyboard(chatID int64, cfg engine.GameConfig) tgbotapi.InlineKeyboardMarkup {
-	var rows [][]tgbotapi.InlineKeyboardButton
-
-	var presetRow []tgbotapi.InlineKeyboardButton
-	for _, name := range engine.PresetNames() {
-		label, _ := engine.PresetLabel(name)
-		if name == cfg.PresetName {
-			label = "▸ " + label
-		}
-		presetRow = append(presetRow, tgbotapi.NewInlineKeyboardButtonData(
-			label, fmt.Sprintf("cfg:%d:preset:%s", chatID, name)))
-		if len(presetRow) == 2 {
-			rows = append(rows, tgbotapi.NewInlineKeyboardRow(presetRow...))
-			presetRow = nil
-		}
-	}
-	if len(presetRow) > 0 {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(presetRow...))
-	}
-
-	for _, s := range engine.Settings() {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(
-				fmt.Sprintf("%s — %s", s.Label, s.Display(cfg)),
-				fmt.Sprintf("cfg:%d:set:%s", chatID, s.Key)),
-		))
-	}
-
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("💾 Save & close", fmt.Sprintf("cfg:%d:close:x", chatID)),
-	))
-	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }

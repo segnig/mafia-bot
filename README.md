@@ -79,7 +79,7 @@ Full guide: [docs/DEPLOY_RENDER.md](docs/DEPLOY_RENDER.md)
 | `/status` | Group | Phase, timer, alive and dead counts |
 | `/graveyard` | Group | The dead, in the order they died |
 | `/roles` | Group or DM | Full role reference |
-| `/settings` | Group (host/admin) | Inline settings panel with presets |
+| `/settings` | Group (host/admin, lobby only) | Configure rules before /begin |
 | `/accuse`, `/defend`, `/whisper` | Group (alive) | Interactive discussion |
 | `/nominate`, `/second` | Group (alive) | Trial mode |
 | `/reveal` | Group (Mayor) | Trade anonymity for vote weight |

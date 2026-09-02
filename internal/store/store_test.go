@@ -295,6 +295,27 @@ func TestChatSettingsRoundTripWithOverrides(t *testing.T) {
 	}
 }
 
+func TestFromConfigStoresOnlyDiffsFromPreset(t *testing.T) {
+	cfg := engine.PresetConfig(engine.PresetChaos)
+	cfg.NightTimeoutSec = 120
+
+	settings := FromConfig(-100, cfg)
+	if settings.Preset != engine.PresetChaos {
+		t.Fatalf("preset = %q", settings.Preset)
+	}
+	if _, ok := settings.Overrides["lovers"]; ok {
+		t.Error("lovers still matches the chaos preset default and should not be stored")
+	}
+	if settings.Overrides["night"] != "120" {
+		t.Errorf("night override = %q, want 120", settings.Overrides["night"])
+	}
+
+	roundTrip := settings.Config()
+	if roundTrip.NightTimeoutSec != 120 {
+		t.Errorf("round-trip night = %d, want 120", roundTrip.NightTimeoutSec)
+	}
+}
+
 // An override left over from an older build must be ignored rather than
 // producing a config that cannot deal a game.
 func TestChatSettingsIgnoreUnplayableOverrides(t *testing.T) {
