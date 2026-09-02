@@ -3,6 +3,7 @@ package telegram
 import (
 	"fmt"
 	"log"
+	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/segni/mafia-bot/internal/actor"
@@ -114,7 +115,7 @@ func (b *Bot) mentionedPlayer(msg *tgbotapi.Message) engine.PlayerID {
 }
 
 // ---------------------------------------------------------------------------
-// Lobby settings (configured during game creation)
+// Lobby settings (configured during game creation, host only)
 // ---------------------------------------------------------------------------
 
 // cmdSettings opens the lobby configuration panel while a lobby is open.
@@ -124,26 +125,74 @@ func (b *Bot) cmdSettings(msg *tgbotapi.Message) {
 		return
 	}
 
-	ga := b.supervisor.GetGame(gameIDForChat(msg.Chat.ID))
+	ga := b.lobbyGame(msg.Chat.ID)
 	if ga == nil {
 		b.sender.SendText(msg.Chat.ID, "No lobby is open. Run /startgame first, then configure the rules before /begin.")
 		return
 	}
-	if ga.Phase() != engine.PhaseLobby {
-		b.sender.SendText(msg.Chat.ID, "Settings are locked once the game starts. Change them in the lobby before /begin.")
-		return
-	}
-	if !b.mayEditLobbyConfig(ga, msg.From.ID) {
-		b.sender.SendText(msg.Chat.ID, "Only the host or a group admin can configure this game.")
+	if !b.isLobbyHost(ga, msg.From.ID) {
+		b.sender.SendText(msg.Chat.ID, "Only the host can configure this game.")
 		return
 	}
 	b.openLobbySettingsPanel(ga.State())
 }
 
-func (b *Bot) mayEditLobbyConfig(ga *actor.GameActor, userID int64) bool {
-	if b.isGroupAdmin(ga.ChatID(), userID) {
-		return true
+// cmdSet lets the host set a custom value: /set night 75, /set lovers on
+func (b *Bot) cmdSet(msg *tgbotapi.Message) {
+	if msg.Chat.IsPrivate() {
+		b.sender.SendDM(msg.Chat.ID, "Use /set in the group lobby. Example: `/set night 75`")
+		return
 	}
+
+	ga := b.lobbyGame(msg.Chat.ID)
+	if ga == nil {
+		b.sender.SendText(msg.Chat.ID, "No lobby is open. Run /startgame first.")
+		return
+	}
+	if !b.isLobbyHost(ga, msg.From.ID) {
+		b.sender.SendText(msg.Chat.ID, "Only the host can change settings.")
+		return
+	}
+
+	args := strings.Fields(msg.CommandArguments())
+	if len(args) == 0 {
+		b.sender.SendText(msg.Chat.ID, engine.FormatSetHelp())
+		return
+	}
+	if len(args) < 2 {
+		b.sender.SendText(msg.Chat.ID, "Usage: `/set <key> <value>`\nExample: `/set night 75` or `/set lovers on`")
+		return
+	}
+
+	key, value := strings.ToLower(args[0]), args[1]
+	cfg := ga.State().Config
+	if err := engine.SetSettingValue(&cfg, key, value); err != nil {
+		b.sender.SendText(msg.Chat.ID, fmt.Sprintf("Couldn't set `%s`: %s\n\n%s",
+			engine.EscapeMD(key), engine.EscapeMD(err.Error()), engine.FormatSetHelp()))
+		return
+	}
+	if err := engine.ValidateConfig(cfg); err != nil {
+		b.sender.SendText(msg.Chat.ID, "That combination wouldn't make a playable game. Try a different value.")
+		return
+	}
+
+	ga.Send(engine.ConfigSettingEvent{
+		PlayerID: engine.PlayerID(msg.From.ID),
+		Key:      key,
+		Value:    value,
+	})
+	b.sender.SendText(msg.Chat.ID, fmt.Sprintf("✅ Set *%s* → *%s*", engine.EscapeMD(key), engine.EscapeMD(value)))
+}
+
+func (b *Bot) lobbyGame(chatID int64) *actor.GameActor {
+	ga := b.supervisor.GetGame(gameIDForChat(chatID))
+	if ga == nil || ga.Phase() != engine.PhaseLobby {
+		return nil
+	}
+	return ga
+}
+
+func (b *Bot) isLobbyHost(ga *actor.GameActor, userID int64) bool {
 	return ga.State().HostID == engine.PlayerID(userID)
 }
 
@@ -183,7 +232,7 @@ func (b *Bot) handleLobbyConfigCallback(cq *tgbotapi.CallbackQuery, parts []stri
 
 	action := parts[2]
 	if action == "open" {
-		if !b.mayEditLobbyConfig(ga, cq.From.ID) {
+		if !b.isLobbyHost(ga, cq.From.ID) {
 			b.answerCallback(cq, "")
 			b.sender.SendText(state.ChatID, engine.FormatSettingsPanel(state.Config))
 			return
@@ -193,13 +242,12 @@ func (b *Bot) handleLobbyConfigCallback(cq *tgbotapi.CallbackQuery, parts []stri
 		return
 	}
 
-	if !b.mayEditLobbyConfig(ga, cq.From.ID) {
-		b.answerCallback(cq, "Only the host or a group admin can change settings.")
+	if !b.isLobbyHost(ga, cq.From.ID) {
+		b.answerCallback(cq, "Only the host can change settings.")
 		return
 	}
 
 	playerID := engine.PlayerID(cq.From.ID)
-	isAdmin := b.isGroupAdmin(state.ChatID, cq.From.ID)
 
 	switch action {
 	case "close":
@@ -222,7 +270,7 @@ func (b *Bot) handleLobbyConfigCallback(cq *tgbotapi.CallbackQuery, parts []stri
 			b.answerCallback(cq, "That preset wouldn't make a playable game.")
 			return
 		}
-		ga.Send(engine.ConfigPresetEvent{PlayerID: playerID, IsAdmin: isAdmin, Preset: parts[3]})
+		ga.Send(engine.ConfigPresetEvent{PlayerID: playerID, Preset: parts[3]})
 		b.answerCallback(cq, "")
 		b.editLobbySettingsPanelConfig(cq, state.ChatID, gameID, cfg)
 
@@ -238,7 +286,7 @@ func (b *Bot) handleLobbyConfigCallback(cq *tgbotapi.CallbackQuery, parts []stri
 			b.answerCallback(cq, "That combination wouldn't make a playable game.")
 			return
 		}
-		ga.Send(engine.ConfigSettingEvent{PlayerID: playerID, IsAdmin: isAdmin, Key: parts[3]})
+		ga.Send(engine.ConfigSettingEvent{PlayerID: playerID, Key: parts[3]})
 		b.answerCallback(cq, "")
 		b.editLobbySettingsPanelConfig(cq, state.ChatID, gameID, cfg)
 

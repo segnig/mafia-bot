@@ -874,6 +874,33 @@ func TestSettingsApplyOnTopOfEveryPreset(t *testing.T) {
 	}
 }
 
+func TestSetSettingValueAcceptsCustomNumbers(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if err := SetSettingValue(&cfg, "night", "75"); err != nil {
+		t.Fatalf("custom night: %v", err)
+	}
+	if cfg.NightTimeoutSec != 75 {
+		t.Errorf("night = %d, want 75", cfg.NightTimeoutSec)
+	}
+
+	if err := SetSettingValue(&cfg, "night", "10"); err == nil {
+		t.Error("night below minimum should fail")
+	}
+	if err := SetSettingValue(&cfg, "lovers", "on"); err != nil {
+		t.Fatalf("lovers on: %v", err)
+	}
+	if !cfg.EnableLovers {
+		t.Error("lovers should be on")
+	}
+	if err := SetSettingValue(&cfg, "lovers", "off"); err != nil {
+		t.Fatalf("lovers off: %v", err)
+	}
+	if cfg.EnableLovers {
+		t.Error("lovers should be off")
+	}
+}
+
 func TestLobbyConfigOnlyWhileOpen(t *testing.T) {
 	gs := NewGameState("g1", -100, 1, DefaultConfig())
 	gs.Config.MinPlayers = 1

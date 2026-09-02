@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // SettingKind distinguishes a plain on/off switch from one that cycles through
@@ -23,8 +24,11 @@ type Setting struct {
 	Label string
 	Help  string
 	Kind  SettingKind
-	// Choices are the allowed values for a SettingChoice, in cycle order.
+	// Choices are preset values shown when cycling; custom values within
+	// Min/Max are also accepted via /set.
 	Choices []string
+	Min     int // minimum for numeric settings; 0 means unused
+	Max     int // maximum for numeric settings; 0 means unused
 	// Get reads the current value as a string.
 	Get func(cfg GameConfig) string
 	// Set writes a value. It is only called with a value Validate accepted.
@@ -72,13 +76,14 @@ func boolSetting(key, label, help string, get func(GameConfig) bool, set func(*G
 	}
 }
 
-func secondsSetting(key, label, help string, choices []int, get func(GameConfig) int, set func(*GameConfig, int)) Setting {
+func secondsSetting(key, label, help string, choices []int, min, max int, get func(GameConfig) int, set func(*GameConfig, int)) Setting {
 	options := make([]string, len(choices))
 	for i, c := range choices {
 		options[i] = strconv.Itoa(c)
 	}
 	return Setting{
-		Key: key, Label: label, Help: help, Kind: SettingChoice, Choices: options,
+		Key: key, Label: label, Help: help, Kind: SettingChoice,
+		Choices: options, Min: min, Max: max,
 		Get: func(cfg GameConfig) string { return strconv.Itoa(get(cfg)) },
 		Set: func(cfg *GameConfig, value string) {
 			if n, err := strconv.Atoi(value); err == nil {
@@ -89,23 +94,23 @@ func secondsSetting(key, label, help string, choices []int, get func(GameConfig)
 }
 
 var settingsRegistry = []Setting{
-	secondsSetting("night", "🌙 Night length", "Time to submit night actions",
-		[]int{30, 45, 60, 90, 120},
+	secondsSetting("night", "🌙 Night length", "Seconds for night actions (20–300)",
+		[]int{30, 45, 60, 90, 120}, 20, 300,
 		func(c GameConfig) int { return c.NightTimeoutSec },
 		func(c *GameConfig, n int) { c.NightTimeoutSec = n }),
 
-	secondsSetting("discussion", "💬 Discussion length", "Time to argue before the vote",
-		[]int{45, 60, 90, 120, 180, 240},
+	secondsSetting("discussion", "💬 Discussion length", "Seconds to argue before voting (30–600)",
+		[]int{45, 60, 90, 120, 180, 240}, 30, 600,
 		func(c GameConfig) int { return c.DiscussionTimeoutSec },
 		func(c *GameConfig, n int) { c.DiscussionTimeoutSec = n }),
 
-	secondsSetting("voting", "🗳️ Voting length", "Time to cast ballots",
-		[]int{20, 30, 45, 60, 90},
+	secondsSetting("voting", "🗳️ Voting length", "Seconds to cast ballots (15–180)",
+		[]int{20, 30, 45, 60, 90}, 15, 180,
 		func(c GameConfig) int { return c.VotingTimeoutSec },
 		func(c *GameConfig, n int) { c.VotingTimeoutSec = n }),
 
-	secondsSetting("lobby", "🚪 Lobby length", "How long a lobby stays open",
-		[]int{120, 180, 300, 600},
+	secondsSetting("lobby", "🚪 Lobby length", "Seconds the lobby stays open (60–1800)",
+		[]int{120, 180, 300, 600}, 60, 1800,
 		func(c GameConfig) int { return c.LobbyTimeoutSec },
 		func(c *GameConfig, n int) { c.LobbyTimeoutSec = n }),
 
@@ -161,8 +166,8 @@ var settingsRegistry = []Setting{
 		func(c GameConfig) bool { return c.DoctorSelfProtect },
 		func(c *GameConfig, v bool) { c.DoctorSelfProtect = v }),
 
-	secondsSetting("special_roles", "🎲 Special role density", "Lower means more special roles",
-		[]int{2, 3, 4},
+	secondsSetting("special_roles", "🎲 Special role density", "Lower = more special roles (2–6)",
+		[]int{2, 3, 4}, 2, 6,
 		func(c GameConfig) int { return c.SpecialRoleDivisor },
 		func(c *GameConfig, n int) { c.SpecialRoleDivisor = n }),
 }
@@ -185,26 +190,40 @@ func SettingByKey(key string) (Setting, bool) {
 // ApplySetting writes one stored override onto a config. An unknown key or an
 // unusable value is ignored, so an old stored setting can never break a game.
 func ApplySetting(cfg *GameConfig, key, value string) {
-	s, ok := SettingByKey(key)
-	if !ok {
-		return
-	}
-	if s.Kind == SettingChoice && !containsString(s.Choices, value) {
-		return
-	}
-	if s.Kind == SettingToggle && value != "true" && value != "false" {
-		return
-	}
-	s.Set(cfg, value)
+	_ = SetSettingValue(cfg, key, value)
 }
 
-func containsString(list []string, value string) bool {
-	for _, item := range list {
-		if item == value {
-			return true
+// SetSettingValue applies one setting, accepting custom numeric values within
+// each setting's allowed range. Returns an error for unknown keys or bad values.
+func SetSettingValue(cfg *GameConfig, key, value string) error {
+	s, ok := SettingByKey(key)
+	if !ok {
+		return fmt.Errorf("unknown setting %q", key)
+	}
+	if s.Kind == SettingToggle {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "true", "on", "yes", "1":
+			s.Set(cfg, "true")
+			return nil
+		case "false", "off", "no", "0":
+			s.Set(cfg, "false")
+			return nil
+		default:
+			return fmt.Errorf("use on or off")
 		}
 	}
-	return false
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return fmt.Errorf("must be a number")
+	}
+	if s.Min > 0 && n < s.Min {
+		return fmt.Errorf("minimum is %d", s.Min)
+	}
+	if s.Max > 0 && n > s.Max {
+		return fmt.Errorf("maximum is %d", s.Max)
+	}
+	s.Set(cfg, strconv.Itoa(n))
+	return nil
 }
 
 // ApplyPreset replaces cfg with a named preset's defaults.
@@ -224,8 +243,9 @@ func CycleSetting(cfg *GameConfig, key string) bool {
 }
 
 // CanEditLobbyConfig reports whether a user may change lobby settings.
-func CanEditLobbyConfig(hostID, playerID PlayerID, isAdmin bool) bool {
-	return isAdmin || hostID == playerID
+// Only the host may configure a game.
+func CanEditLobbyConfig(hostID, playerID PlayerID) bool {
+	return hostID == playerID
 }
 
 // FormatSettingsPanel is the read-only rules summary shown to players.
@@ -236,7 +256,7 @@ func FormatSettingsPanel(cfg GameConfig) string {
 	msg += fmt.Sprintf("🌙 Night %ds  ·  💬 Day %ds  ·  🗳️ Vote %ds\n",
 		cfg.NightTimeoutSec, cfg.DiscussionTimeoutSec, cfg.VotingTimeoutSec)
 	msg += divider + "\n"
-	msg += "_The host configures these in the lobby before /begin._"
+	msg += "_Only the host configures these in the lobby before /begin._"
 	return msg
 }
 
@@ -248,6 +268,23 @@ func FormatLobbySettingsPanel(cfg GameConfig) string {
 	msg += fmt.Sprintf("🌙 Night %ds  ·  💬 Day %ds  ·  🗳️ Vote %ds\n",
 		cfg.NightTimeoutSec, cfg.DiscussionTimeoutSec, cfg.VotingTimeoutSec)
 	msg += divider + "\n"
-	msg += "_Tap to change. Locked when the host runs /begin._"
+	msg += "_Tap to cycle · `/set night 75` for custom values_\n"
+	msg += "_Locked when you run /begin._"
+	return msg
+}
+
+// FormatSetHelp lists /set usage for the host.
+func FormatSetHelp() string {
+	msg := "⚙️ *Custom settings* (host only, lobby only)\n" + divider + "\n"
+	msg += "Usage: `/set <key> <value>`\n\n"
+	for _, s := range Settings() {
+		switch s.Kind {
+		case SettingToggle:
+			msg += fmt.Sprintf("• `%s` — on/off\n", s.Key)
+		default:
+			msg += fmt.Sprintf("• `%s` — %d–%d\n", s.Key, s.Min, s.Max)
+		}
+	}
+	msg += divider + "\n_Example: `/set night 75` or `/set lovers on`_"
 	return msg
 }

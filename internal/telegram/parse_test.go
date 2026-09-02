@@ -144,19 +144,19 @@ func TestExtractTargetPlayerFromReplyMentionAndTextMention(t *testing.T) {
 	})
 }
 
-// The help card is what players see, so every command the bot actually routes
-// has to appear on it — otherwise a feature ships that nobody can find.
+// Every routed command must appear in /help commands so players can discover it.
 func TestHelpListsEveryRoutedCommand(t *testing.T) {
+	cmds := engine.FormatHelpCommands()
 	required := []string{
 		"/startgame", "/join", "/leave", "/begin", "/endgame",
-		"/status", "/graveyard", "/roles", "/settings",
+		"/status", "/graveyard", "/roles", "/settings", "/set",
 		"/accuse", "/defend", "/whisper", "/nominate", "/second", "/reveal",
 		"/stats", "/leaderboard", "/achievements", "/lastgame",
-		"/myrole", "/mafia", "/ghost", "/host", "/kick",
+		"/myrole", "/mafia", "/ghost", "/host", "/kick", "/help", "/guide",
 	}
 	for _, cmd := range required {
-		if !strings.Contains(helpText, cmd) {
-			t.Errorf("help does not mention %s", cmd)
+		if !strings.Contains(cmds, cmd) {
+			t.Errorf("help commands does not mention %s", cmd)
 		}
 	}
 }

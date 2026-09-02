@@ -79,7 +79,10 @@ Full guide: [docs/DEPLOY_RENDER.md](docs/DEPLOY_RENDER.md)
 | `/status` | Group | Phase, timer, alive and dead counts |
 | `/graveyard` | Group | The dead, in the order they died |
 | `/roles` | Group or DM | Full role reference |
-| `/settings` | Group (host/admin, lobby only) | Configure rules before /begin |
+| `/settings` | Group (host, lobby only) | Configure rules before /begin |
+| `/set <key> <value>` | Group (host, lobby only) | Custom setting, e.g. `/set night 75` |
+| `/help [topic]` | Anywhere | Help menu — try `general`, `settings`, `detective`, … |
+| `/guide` | Anywhere | Link to the full player guide |
 | `/accuse`, `/defend`, `/whisper` | Group (alive) | Interactive discussion |
 | `/nominate`, `/second` | Group (alive) | Trial mode |
 | `/reveal` | Group (Mayor) | Trade anonymity for vote weight |

@@ -112,7 +112,8 @@ Two games with the same players can have completely different compositions. The 
 | `/status` | Anyone | Current phase, timer, alive and dead counts |
 | `/graveyard` | Anyone | The dead, in the order they died |
 | `/roles` | Anyone | Full role reference |
-| `/settings` | Host/Admin (lobby only) | Configure rules before /begin |
+| `/settings` | Host (lobby only) | Configure rules before /begin |
+| `/set <key> <value>` | Host (lobby only) | Set a custom value, e.g. `/set night 75` |
 | `/accuse @player` | Alive & reachable | Publicly accuse someone (or reply to their message) |
 | `/defend [text]` | Alive & reachable | Your defence statement (once per day) |
 | `/whisper @player [msg]` | Alive & reachable | Private message — or reply to them; the group sees that it happened |
@@ -130,6 +131,17 @@ Two games with the same players can have completely different compositions. The 
 | `/leaderboard global` | Anywhere | Best players overall |
 | `/achievements` | Anywhere | What you've unlocked, and what's left |
 | `/lastgame` | Group | Recap of this group's most recent game |
+
+### Help
+
+| Command | Where | Description |
+|---------|-------|-------------|
+| `/help` | Anywhere | Help menu — lists all topics |
+| `/help general` | Anywhere | Full how-to: setup, flow, tips |
+| `/help settings` | Anywhere | Presets, toggles, `/set` custom values |
+| `/help roles` | Anywhere | Role index — then `/help detective`, etc. |
+| `/help <role>` | Anywhere | One role explained in detail |
+| `/guide` | Anywhere | Link to this full guide on GitHub |
 
 ### DM
 
@@ -230,11 +242,24 @@ A game **cancelled by the host counts as neither a win nor a loss**, and leaves 
 
 ## Game Modes & Settings
 
-When someone runs `/startgame`, a **lobby** opens. The host or a group admin configures the rules **there**, before `/begin`:
+When someone runs `/startgame`, a **lobby** opens. **Only the host** configures the rules **before `/begin`**:
 
 1. Tap **⚙️ Configure** on the lobby card, or type `/settings`
-2. Pick a preset, then tap individual options
-3. Tap **✅ Done** — settings are locked once the host runs `/begin`
+2. Pick a preset, tap options to cycle, or use **`/set <key> <value>`** for custom numbers
+3. Tap **✅ Done** — settings lock once the host runs `/begin`
+
+**Custom values** (host only, lobby only):
+
+```
+/set night 75
+/set discussion 150
+/set voting 45
+/set lobby 420
+/set lovers on
+/set special_roles 3
+```
+
+Type `/set` alone for the full list and allowed ranges.
 
 Settings are saved for the group, so the next `/startgame` starts from the same rules unless you change them again in the lobby.
 

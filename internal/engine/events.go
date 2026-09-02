@@ -45,17 +45,17 @@ func (BeginEvent) eventTag() {}
 // game is still in the lobby, before /begin locks the ruleset.
 type ConfigPresetEvent struct {
 	PlayerID PlayerID
-	IsAdmin  bool
 	Preset   string
 }
 
 func (ConfigPresetEvent) eventTag() {}
 
-// ConfigSettingEvent cycles one tweakable setting in the lobby config.
+// ConfigSettingEvent changes one lobby setting. An empty Value cycles through
+// presets; a non-empty Value sets a custom amount (via /set or the panel).
 type ConfigSettingEvent struct {
 	PlayerID PlayerID
-	IsAdmin  bool
 	Key      string
+	Value    string
 }
 
 func (ConfigSettingEvent) eventTag() {}

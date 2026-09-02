@@ -316,52 +316,19 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdLastGame(msg)
 	case "settings":
 		b.cmdSettings(msg)
+	case "set":
+		b.cmdSet(msg)
 	case "roles":
 		b.cmdRoles(msg)
 	case "help":
 		b.cmdHelp(msg)
+	case "guide":
+		b.cmdGuide(msg)
 	case "start":
 		if msg.Chat.IsPrivate() {
 			b.handleDMStart(msg)
 		}
 	}
-}
-
-const helpText = `🎭 *Mafia Bot*
-
-*Setup*
-/startgame — open a lobby
-/join — join the lobby
-/leave — leave the lobby
-/begin — host starts the game
-/settings — host or admin configures rules in the lobby (before /begin)
-
-*During the day*
-/accuse @player — publicly accuse someone
-/defend [statement] — make your case (once per day)
-/whisper @player [text] — private message (the group sees that it happened)
-/reveal — Mayor goes public for a heavier vote
-/nominate @player and /second @player — trial mode only
-
-*In your DMs*
-/myrole — see your role
-/mafia [text] — talk to your mafia team at night
-/ghost [text] — talk to the other eliminated players
-
-*Anytime*
-/status — current game state
-/graveyard — who has died, and what they were
-/roles — every role in the game
-/stats — your record
-/leaderboard — the best players here
-/achievements — what you have unlocked
-/lastgame — recap of the previous game
-/host @player — hand over hosting
-/kick @player — host or admin removes a player
-/endgame — host or admin ends the game`
-
-func (b *Bot) cmdHelp(msg *tgbotapi.Message) {
-	b.sender.SendText(msg.Chat.ID, helpText)
 }
 
 func (b *Bot) cmdRoles(msg *tgbotapi.Message) {
@@ -1120,7 +1087,7 @@ func formatLobbyCardText(state *engine.GameState) string {
 			"\n%s\n"+
 			"━━━━━━━━━━━━━━━━━━━━\n"+
 			"%s\n"+
-			"\n_Tap Join below. Host: tap ⚙️ Configure or /settings before /begin._",
+			"\n_Tap Join below. Host: ⚙️ Configure, /settings, or `/set night 75` before /begin._",
 		engine.EscapeMD(hostName), len(names), maxPlayers,
 		engine.ProgressBar(len(names), maxPlayers, 10),
 		engine.EscapeMD(presetLabel), engine.EscapeMD(presetPitch),

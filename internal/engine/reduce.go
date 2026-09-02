@@ -311,7 +311,7 @@ func reduceConfigPreset(gs *GameState, e ConfigPresetEvent) (*GameState, []SideE
 	if gs.Phase != PhaseLobby {
 		return gs, nil
 	}
-	if !CanEditLobbyConfig(gs.HostID, e.PlayerID, e.IsAdmin) {
+	if !CanEditLobbyConfig(gs.HostID, e.PlayerID) {
 		return gs, nil
 	}
 	cfg := PresetConfig(e.Preset)
@@ -327,18 +327,22 @@ func reduceConfigSetting(gs *GameState, e ConfigSettingEvent) (*GameState, []Sid
 	if gs.Phase != PhaseLobby {
 		return gs, nil
 	}
-	if !CanEditLobbyConfig(gs.HostID, e.PlayerID, e.IsAdmin) {
+	if !CanEditLobbyConfig(gs.HostID, e.PlayerID) {
 		return gs, nil
 	}
 	cfg := gs.Config
-	if !CycleSetting(&cfg, e.Key) {
+	if e.Value != "" {
+		if err := SetSettingValue(&cfg, e.Key, e.Value); err != nil {
+			return gs, nil
+		}
+	} else if !CycleSetting(&cfg, e.Key) {
 		return gs, nil
 	}
 	if err := ValidateConfig(cfg); err != nil {
 		return gs, nil
 	}
 	gs.Config = cfg
-	gs.AppendLog("config_setting", map[string]interface{}{"key": e.Key, "by": e.PlayerID})
+	gs.AppendLog("config_setting", map[string]interface{}{"key": e.Key, "value": e.Value, "by": e.PlayerID})
 	return gs, lobbyConfigEffects(gs)
 }
 
